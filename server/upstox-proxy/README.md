@@ -39,5 +39,6 @@ It stores nothing. It sees each request once and forwards it.
 | `/api/candles?instrument_key=&unit=&interval=` | GET | `Authorization: Bearer <token>` from the caller | Proxies Upstox's Intraday Candle Data V3. |
 | `/api/quotes?instrument_key=` | GET | `Authorization: Bearer <token>` from the caller | Proxies Upstox's full market quote endpoint. |
 | `/health` | GET | none | Liveness check. |
+| `/webhook/postback`, `/webhook/notifier` | GET/POST | none | Order-update callback URLs for Upstox app registration. Always returns 200; this app doesn't place real orders through Upstox yet, so there's nothing to act on the payload for. Point the app's "Postback URL" / "Notifier Webhook Endpoint" fields here once deployed. |
 
 CORS is restricted to the origins listed in `wrangler.toml`'s `ALLOWED_ORIGINS`.

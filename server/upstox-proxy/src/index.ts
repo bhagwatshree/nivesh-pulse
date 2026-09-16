@@ -129,6 +129,19 @@ export default {
       return json({ status: 'ok' }, 200, cors)
     }
 
+    // Upstox's order-update Postback URL and Notifier Webhook Endpoint both
+    // require: no auth, a 2xx response, open to POST (some setups also
+    // GET-probe the URL first to check reachability, so both are accepted
+    // here). This app doesn't place real orders through Upstox yet — paper
+    // fills stay simulated client-side — so there's nothing to act on the
+    // payload for right now. This exists so app registration has a real,
+    // working URL to point at instead of a placeholder.
+    if (url.pathname === '/webhook/postback' || url.pathname === '/webhook/notifier') {
+      if (request.method === 'POST' || request.method === 'GET') {
+        return json({ status: 'ok' }, 200, cors)
+      }
+    }
+
     return json({ error: 'not_found' }, 404, cors)
   },
 }
