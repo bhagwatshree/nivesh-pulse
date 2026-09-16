@@ -11,5 +11,10 @@ export function formatIstDateTime(date: Date): string {
     hour12: false,
   }).formatToParts(date)
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00'
-  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
+  // Some ICU implementations format midnight as "24" instead of "00" even
+  // with hour12: false (observed to differ between Node/browser builds) —
+  // normalize explicitly rather than depending on which behavior the
+  // runtime happens to have.
+  const hour = get('hour') === '24' ? '00' : get('hour')
+  return `${get('year')}-${get('month')}-${get('day')} ${hour}:${get('minute')}:${get('second')}`
 }
