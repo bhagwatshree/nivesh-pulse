@@ -62,7 +62,6 @@ import { decide, type Decision } from './engine/decide'
 import { evaluateGates, type GateResult } from './engine/gates'
 import { DEFAULT_POLICY } from './engine/policy'
 import { allocate } from './engine/size'
-import type { QuoteSnapshot } from './data/upstox/mappers'
 import type { PaperOrder, SignalAction, StockSignal } from './types'
 
 type NavId = 'overview' | 'signals' | 'plan' | 'insights' | 'history'
@@ -74,10 +73,6 @@ interface Position {
   openedAt: string
 }
 
-// Stable empty-object reference so the `liveQuotesBySymbol` fallback below
-// doesn't create a new object identity on every render, which would defeat
-// the useMemo that depends on it.
-const EMPTY_QUOTES: Record<string, QuoteSnapshot> = {}
 
 const navItems: { id: NavId; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Today', icon: LayoutDashboard },
@@ -223,22 +218,36 @@ function App() {
   const growwQuotes = useGrowwQuotes(growwSession.accessToken)
   const growwCandles = useGrowwCandles(growwSession.accessToken, selectedSymbol)
 
-  // Upstox takes priority when both happen to be connected (it's the
-  // documented, durable integration; Groww's manual-token path is the
-  // quick validation route). Only one provider's prices feed the app at a
-  // time — mixing two live sources per symbol would be its own source of
-  // confusing, hard-to-audit numbers.
-  const activeProvider = upstoxSession.status === 'connected' ? 'upstox' : growwSession.status === 'connected' ? 'groww' : null
-  const liveQuotesBySymbol =
-    activeProvider === 'upstox' ? liveQuotes.bySymbol : activeProvider === 'groww' ? growwQuotes.bySymbol : EMPTY_QUOTES
-  const activeLiveCandles = activeProvider === 'upstox' ? liveCandles.candles : activeProvider === 'groww' ? growwCandles.candles : null
-  const liveLastUpdated = activeProvider === 'upstox' ? liveQuotes.lastUpdated : activeProvider === 'groww' ? growwQuotes.lastUpdated : null
-  const activeProviderToken = activeProvider === 'upstox' ? upstoxSession.accessToken : activeProvider === 'groww' ? growwSession.accessToken : null
-  const liveIndices = useLiveIndices(activeProvider, activeProviderToken)
+  // Automatic per-symbol failover: both providers fetch independently and
+  // continuously whenever their own session is connected (each hook is a
+  // no-op with no token). Upstox is preferred — it's the documented, durable
+  // integration — but for any symbol Upstox's fetch didn't return (an
+  // error, a gap, or simply not connected), Groww's value is used instead
+  // if available. Spreading Groww first then Upstox means Upstox always
+  // wins per key when both have one, and this degrades correctly in every
+  // connection combination (only Upstox, only Groww, both, or neither)
+  // without a separate branch for each.
+  const upstoxConnected = upstoxSession.status === 'connected'
+  const growwConnected = growwSession.status === 'connected'
+  const anyLiveConnected = upstoxConnected || growwConnected
+  const providerLabel =
+    upstoxConnected && growwConnected ? 'Upstox + Groww' : upstoxConnected ? 'Upstox' : growwConnected ? 'Groww' : null
+
+  const liveQuotesBySymbol = useMemo(
+    () => ({ ...growwQuotes.bySymbol, ...liveQuotes.bySymbol }),
+    [growwQuotes.bySymbol, liveQuotes.bySymbol],
+  )
+  const activeLiveCandles = liveCandles.candles ?? growwCandles.candles
+  const liveLastUpdated = [liveQuotes.lastUpdated, growwQuotes.lastUpdated]
+    .filter((date): date is Date => date !== null)
+    .sort((a, b) => b.getTime() - a.getTime())[0] ?? null
+
+  const liveIndices = useLiveIndices(upstoxSession.accessToken, growwSession.accessToken)
+  const hasLiveIndices = Object.keys(liveIndices.byLabel).length > 0
   const effectiveIndices = useMemo(
     () =>
       marketIndices.map((index) => {
-        const live = liveIndices.indices?.find((item) => item.label === index.name)
+        const live = liveIndices.byLabel[index.name]
         if (!live || live.value <= 0) return index
         return {
           name: index.name,
@@ -249,7 +258,7 @@ function App() {
               : index.change,
         }
       }),
-    [liveIndices.indices],
+    [liveIndices.byLabel],
   )
 
   const priceAdjustedSignals = useMemo(
@@ -593,18 +602,19 @@ function App() {
           </div>
         </header>
 
-        <div className={activeProvider ? 'demo-notice demo-notice-live' : 'demo-notice'}>
-          {activeProvider ? (
+        <div className={anyLiveConnected ? 'demo-notice demo-notice-live' : 'demo-notice'}>
+          {anyLiveConnected ? (
             <Wifi size={16} />
           ) : upstoxSession.status === 'error' ? (
             <TriangleAlert size={16} />
           ) : (
             <Info size={16} />
           )}
-          {activeProvider ? (
+          {anyLiveConnected ? (
             <p>
-              <strong>Live prices from {activeProvider === 'upstox' ? 'Upstox' : 'Groww'}.</strong> Scores, entries,
-              stops and fills remain the synthetic v0.3-demo baseline—not investment advice.
+              <strong>Live prices from {providerLabel}.</strong>
+              {upstoxConnected && growwConnected && ' Upstox preferred, Groww fills in automatically for anything Upstox misses.'}
+              {' '}Scores, entries, stops and fills remain the synthetic v0.3-demo baseline—not investment advice.
               {liveLastUpdated && (
                 <> Updated {Math.max(0, Math.round((now.getTime() - liveLastUpdated.getTime()) / 1000))}s ago.</>
               )}
@@ -643,7 +653,9 @@ function App() {
             {growwSession.status === 'connected' ? (
               <p>
                 <strong>Groww token active.</strong>
-                {activeProvider === 'groww' ? ' Feeding live prices.' : ' Upstox is connected, so Groww is on standby.'}
+                {upstoxConnected
+                  ? ' Filling in automatically for anything Upstox misses.'
+                  : ' Feeding live prices.'}
                 {' '}Expires ~6:00 AM IST daily—reconnect with a fresh token tomorrow.
               </p>
             ) : (
@@ -707,9 +719,9 @@ function App() {
             </div>
           </section>
 
-          <section className="market-tape" aria-label={liveIndices.indices ? 'Live market indices' : 'Illustrative market indices'}>
+          <section className="market-tape" aria-label={hasLiveIndices ? 'Live market indices' : 'Illustrative market indices'}>
             <span className="tape-label">
-              <Radio size={14} /> {liveIndices.indices ? `Live · ${activeProvider === 'upstox' ? 'Upstox' : 'Groww'}` : 'Demo snapshot'}
+              <Radio size={14} /> {hasLiveIndices ? `Live · ${providerLabel}` : 'Demo snapshot'}
             </span>
             {effectiveIndices.map((index) => (
               <span className="index-tick" key={index.name}>
@@ -719,7 +731,7 @@ function App() {
               </span>
             ))}
             <span className="data-time">
-              {liveIndices.indices ? 'Live index quotes' : 'Illustrative only—not live index data'}
+              {hasLiveIndices ? 'Live index quotes' : 'Illustrative only—not live index data'}
             </span>
           </section>
 
