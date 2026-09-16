@@ -4,6 +4,36 @@ NiveshPulse is a responsive paper-trading decision-support prototype for Indian 
 
 All prices, candles, headlines, model scores, and fills in this repository are synthetic. The app does not connect to an exchange or broker and does not provide live investment advice.
 
+## Live data status
+
+As of this commit, the app's visible screens still run entirely on the
+synthetic fixtures in `src/data/market.ts` — connecting them to real Upstox
+data is not done yet. What **is** built and tested, ready for that last step:
+
+- `src/data/instrumentKeys.ts` — real Upstox instrument keys for the six
+  fixture symbols, resolved from Upstox's public instrument master (no
+  account needed for this part). Regenerate with
+  `node scripts/fetch-instrument-keys.mjs`.
+  **Note:** `TATAMOTORS` no longer exists as a single NSE symbol — Tata
+  Motors demerged into `TMCV` (commercial vehicles) and `TMPV` (passenger
+  vehicles). This currently maps to `TMPV`; see the comment at the top of
+  the generated file before relying on that choice.
+- `server/upstox-proxy/` — a Cloudflare Worker that holds the Upstox OAuth
+  client secret (which must never reach the browser) and proxies the token
+  exchange, candle, and quote requests. See its own README for setup.
+- `src/data/upstox/` — the frontend's OAuth flow, proxy client, and response
+  mappers, each covered by unit tests against Upstox's documented response
+  shapes (`npm test`).
+
+To finish wiring this in, two things are still required and neither can be
+done from this repo alone:
+1. An Upstox developer app at https://upstox.com/developer/apps, with
+   **redirect URI** set to `https://bhagwatshree.github.io/nivesh-pulse/`
+   (must match `VITE_UPSTOX_REDIRECT_URI` exactly).
+2. `server/upstox-proxy` deployed to Cloudflare Workers (`wrangler login`,
+   then follow that package's README) so the client secret has somewhere
+   safe to live.
+
 ## Run locally
 
 ```bash

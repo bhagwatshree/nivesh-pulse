@@ -6,7 +6,9 @@ vite.config.js
 vite.config.d.ts
 .env
 .env.*
+!.env.example
 *.local
 coverage/
 .DS_Store
 Thumbs.db
+scripts/.cache/

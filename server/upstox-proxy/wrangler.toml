@@ -1,0 +1,11 @@
+name = "nivesh-pulse-upstox-proxy"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# Non-secret config. UPSTOX_CLIENT_ID is an OAuth client id, not confidential
+# (Upstox's own authorize-dialog URL is built with it client-side too) — it's
+# fine here. UPSTOX_CLIENT_SECRET must NEVER go in this file; set it with:
+#   wrangler secret put UPSTOX_CLIENT_SECRET
+[vars]
+UPSTOX_CLIENT_ID = "REPLACE_WITH_YOUR_UPSTOX_CLIENT_ID"
+ALLOWED_ORIGINS = "https://bhagwatshree.github.io,http://localhost:5173"
