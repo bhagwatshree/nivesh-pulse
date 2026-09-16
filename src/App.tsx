@@ -24,6 +24,7 @@ import {
   Play,
   Radio,
   RefreshCw,
+  ScanSearch,
   Search,
   Settings2,
   ShieldCheck,
@@ -53,6 +54,7 @@ import { useGrowwSession } from './hooks/useGrowwSession'
 import { useLiveCandles } from './hooks/useLiveCandles'
 import { useLiveIndices } from './hooks/useLiveIndices'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
+import { useScreener } from './hooks/useScreener'
 import { useUpstoxSession } from './hooks/useUpstoxSession'
 import { inr } from './lib/allocation'
 import { computeSignalPnl, RESOLUTION_WINDOW_MS, type SignalNotification } from './lib/signalOutcome'
@@ -64,7 +66,7 @@ import { DEFAULT_POLICY } from './engine/policy'
 import { allocate } from './engine/size'
 import type { PaperOrder, SignalAction, StockSignal } from './types'
 
-type NavId = 'overview' | 'signals' | 'plan' | 'insights' | 'history'
+type NavId = 'overview' | 'signals' | 'screener' | 'plan' | 'insights' | 'history'
 
 interface Position {
   symbol: string
@@ -77,6 +79,7 @@ interface Position {
 const navItems: { id: NavId; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Today', icon: LayoutDashboard },
   { id: 'signals', label: 'Signals', icon: CandlestickIcon },
+  { id: 'screener', label: 'Screener', icon: ScanSearch },
   { id: 'plan', label: 'Allocation', icon: WalletCards },
   { id: 'insights', label: 'Research', icon: Newspaper },
   { id: 'history', label: 'Journal', icon: History },
@@ -217,6 +220,7 @@ function App() {
   const growwSession = useGrowwSession()
   const growwQuotes = useGrowwQuotes(growwSession.accessToken)
   const growwCandles = useGrowwCandles(growwSession.accessToken, selectedSymbol)
+  const screener = useScreener()
 
   // Automatic per-symbol failover: both providers fetch independently and
   // continuously whenever their own session is connected (each hook is a
@@ -931,6 +935,97 @@ function App() {
                 <div className="empty-search"><Search size={20} /><span>No symbol matches “{searchQuery}”.</span></div>
               )}
             </div>
+          </section>
+
+          <section id="screener" className="anchor-section section-block">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Nifty 50 technical screener</p>
+                <h2>Top picks across the index</h2>
+              </div>
+              <span className="section-meta">
+                {screener.result?.generatedAt
+                  ? `Scanned ${screener.result.scannedCount ?? 0} of ${screener.result.universeSize ?? 50} · via ${screener.result.provider === 'upstox' ? 'Upstox' : 'Groww'}`
+                  : 'No scan yet'}
+              </span>
+            </div>
+
+            <article className="panel screener-panel">
+              <div className="screener-disclaimer">
+                <TriangleAlert size={15} />
+                <p>
+                  Technical score only (max 60/100) — RSI, EMA 9/21, VWAP and volume z-score from real candles.
+                  Market/sector, news, fundamentals and risk-quality evidence (the spec's other 40 points) aren't
+                  included. "Lean" is a ranking, not the gated BUY/WAIT/EXIT verdict the six tracked signals above
+                  use. Updates every 5 minutes during market hours, only on days a connected session exists.
+                </p>
+              </div>
+
+              {screener.error && (
+                <div className="screener-empty">
+                  <TriangleAlert size={22} />
+                  <strong>Could not load the screener</strong>
+                  <p>{screener.error}</p>
+                </div>
+              )}
+
+              {!screener.error && (!screener.result || screener.result.picks.length === 0) && (
+                <div className="screener-empty">
+                  <ScanSearch size={22} />
+                  <strong>No scan published yet</strong>
+                  <p>
+                    The scheduled scan runs every 5 minutes during market hours once a session token is available —
+                    connect Upstox or Groww above, then check back.
+                  </p>
+                </div>
+              )}
+
+              {screener.result && screener.result.picks.length > 0 && (
+                <div className="screener-table" role="table" aria-label="Nifty 50 top picks">
+                  <div className="screener-head" role="row">
+                    <span>Rank</span>
+                    <span>Stock</span>
+                    <span>Price</span>
+                    <span>Technical score</span>
+                    <span>RSI</span>
+                    <span>Volume</span>
+                    <span>Lean</span>
+                  </div>
+                  {screener.result.picks.map((pick, index) => (
+                    <div className="screener-row" role="row" key={pick.symbol}>
+                      <span className="screener-rank">{index + 1}</span>
+                      <span className="screener-stock">
+                        <strong>{pick.symbol}</strong>
+                        <small>{pick.name}</small>
+                      </span>
+                      <span>{inr(pick.lastClose, 2)}</span>
+                      <span className="screener-score">
+                        <strong>{pick.technicalScore.toFixed(1)}</strong>
+                        <small>/{pick.technicalScoreMax}</small>
+                        <i><b style={{ width: `${Math.min(100, (pick.technicalScore / pick.technicalScoreMax) * 100)}%` }} /></i>
+                      </span>
+                      <span>{pick.rsi.toFixed(1)}</span>
+                      <span className={pick.volumeZScore >= 0 ? 'text-buy' : 'text-exit'}>
+                        {pick.volumeZScore >= 0 ? '+' : ''}
+                        {pick.volumeZScore.toFixed(2)}σ
+                      </span>
+                      <span className={`screener-lean screener-lean-${pick.lean.toLowerCase()}`}>{pick.lean}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {screener.result?.generatedAt && (
+                <p className="screener-updated">
+                  Last scanned{' '}
+                  {new Date(screener.result.generatedAt).toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  })}{' '}
+                  IST
+                </p>
+              )}
+            </article>
           </section>
 
           <section id="plan" className="anchor-section section-block">

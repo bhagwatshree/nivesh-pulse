@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { isGrowwConfigured } from '../config/groww'
+import { growwConfig, isGrowwConfigured } from '../config/groww'
 
 const STORAGE_KEY = 'nivesh-pulse:groww-token'
 
@@ -44,6 +44,22 @@ export function useGrowwSession(): GrowwSession {
     }
     setAccessToken(trimmed)
     setStatus('connected')
+
+    // Also registers the token with the Worker's KV store, purely so the
+    // scheduled Nifty 50 screener scan (which has no browser session of
+    // its own) can reuse it for the rest of today — same idea as the
+    // Upstox exchange endpoint persisting its token automatically. Best
+    // effort: if this fails, the manual-token flow above still works
+    // exactly as before, the screener just won't have a Groww token today.
+    if (growwConfig) {
+      fetch(`${growwConfig.proxyUrl}/groww/register-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: trimmed }),
+      }).catch(() => {
+        /* screener registration is best-effort; the session itself is unaffected */
+      })
+    }
   }, [])
 
   const disconnect = useCallback(() => {

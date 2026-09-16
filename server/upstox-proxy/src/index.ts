@@ -18,13 +18,20 @@
 // commit history), so a browser can't call it directly regardless of the
 // token being valid.
 //
-// This worker holds no state and no user data: it never stores an access
-// token, never sees anything beyond a single request/response.
+// The candle/quote/token-exchange routes above hold no state — each sees
+// only a single request/response. The /internal/* and /screener/* routes
+// below are the one exception: they persist the day's session token and
+// the latest Nifty 50 screener results in KV, purely so a GitHub Actions
+// cron job (which has no browser session) can read a token and publish
+// results without the client secret or any user credential ever leaving
+// this Worker. See server/upstox-proxy/README.md.
 
 export interface Env {
   UPSTOX_CLIENT_ID: string
   UPSTOX_CLIENT_SECRET: string
   ALLOWED_ORIGINS: string
+  SCAN_SHARED_SECRET: string
+  NIVESH_KV: KVNamespace
 }
 
 const UPSTOX_API = 'https://api.upstox.com'
@@ -76,13 +83,86 @@ async function handleExchange(request: Request, env: Env, cors: HeadersInit): Pr
     body: form.toString(),
   })
 
-  const data = await upstream.json()
-  // Deliberately not logged or persisted anywhere — relayed straight
-  // through. (A prior version of this function logged the full upstream
-  // response for debugging, which included the live access_token — never
-  // log this response body. See git history if a status-only diagnostic is
-  // ever needed again; log upstream.status alone, never `data`.)
+  const data = (await upstream.json()) as { access_token?: string }
+  // Not logged anywhere (a prior version did — never log this response
+  // body; it includes the live access_token. See git history if a
+  // status-only diagnostic is ever needed again). It IS persisted to KV,
+  // deliberately — that's what lets the screener's scheduled scan run
+  // later today using this same session, without ever handling the
+  // client secret or asking for credentials of its own.
+  if (upstream.ok && data.access_token) {
+    await env.NIVESH_KV.put(
+      'token:upstox',
+      JSON.stringify({ accessToken: data.access_token, obtainedAt: Date.now() }),
+      { expirationTtl: 60 * 60 * 20 }, // ~20h — comfortably covers same-day reuse; Upstox's own token expires sooner anyway
+    )
+  }
   return json(data, upstream.status, cors)
+}
+
+async function handleGrowwRegisterToken(request: Request, env: Env, cors: HeadersInit): Promise<Response> {
+  let body: { token?: string }
+  try {
+    body = await request.json()
+  } catch {
+    return json({ error: 'invalid_json' }, 400, cors)
+  }
+  if (!body.token) return json({ error: 'missing_token' }, 400, cors)
+
+  // Stored purely so the screener's scan can reuse it later today, same
+  // as the Upstox token above — nothing here is a secret this Worker
+  // didn't already have (the user generated and pasted this themselves).
+  await env.NIVESH_KV.put(
+    'token:groww',
+    JSON.stringify({ accessToken: body.token, obtainedAt: Date.now() }),
+    { expirationTtl: 60 * 60 * 20 },
+  )
+  return json({ status: 'ok' }, 200, cors)
+}
+
+function isAuthorizedForInternal(request: Request, env: Env): boolean {
+  const auth = request.headers.get('Authorization')
+  return auth === `Bearer ${env.SCAN_SHARED_SECRET}`
+}
+
+interface StoredToken {
+  accessToken: string
+  obtainedAt: number
+}
+
+async function handleInternalToken(request: Request, env: Env, cors: HeadersInit): Promise<Response> {
+  if (!isAuthorizedForInternal(request, env)) return json({ error: 'unauthorized' }, 401, cors)
+
+  const upstoxRaw = await env.NIVESH_KV.get('token:upstox')
+  if (upstoxRaw) {
+    const stored = JSON.parse(upstoxRaw) as StoredToken
+    return json({ provider: 'upstox', accessToken: stored.accessToken, obtainedAt: stored.obtainedAt }, 200, cors)
+  }
+  const growwRaw = await env.NIVESH_KV.get('token:groww')
+  if (growwRaw) {
+    const stored = JSON.parse(growwRaw) as StoredToken
+    return json({ provider: 'groww', accessToken: stored.accessToken, obtainedAt: stored.obtainedAt }, 200, cors)
+  }
+  return json({ provider: null, accessToken: null }, 200, cors)
+}
+
+async function handleInternalPublishScreener(request: Request, env: Env, cors: HeadersInit): Promise<Response> {
+  if (!isAuthorizedForInternal(request, env)) return json({ error: 'unauthorized' }, 401, cors)
+
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return json({ error: 'invalid_json' }, 400, cors)
+  }
+  await env.NIVESH_KV.put('screener:latest', JSON.stringify(body))
+  return json({ status: 'ok' }, 200, cors)
+}
+
+async function handleScreenerLatest(env: Env, cors: HeadersInit): Promise<Response> {
+  const raw = await env.NIVESH_KV.get('screener:latest')
+  if (!raw) return json({ generatedAt: null, picks: [] }, 200, cors)
+  return new Response(raw, { status: 200, headers: { 'Content-Type': 'application/json', ...cors } })
 }
 
 async function handleCandles(request: Request, url: URL, cors: HeadersInit): Promise<Response> {
@@ -194,6 +274,18 @@ export default {
     }
     if (url.pathname === '/groww/candles' && request.method === 'GET') {
       return handleGrowwCandles(request, url, cors)
+    }
+    if (url.pathname === '/groww/register-token' && request.method === 'POST') {
+      return handleGrowwRegisterToken(request, env, cors)
+    }
+    if (url.pathname === '/internal/token' && request.method === 'GET') {
+      return handleInternalToken(request, env, cors)
+    }
+    if (url.pathname === '/internal/screener' && request.method === 'POST') {
+      return handleInternalPublishScreener(request, env, cors)
+    }
+    if (url.pathname === '/screener/latest' && request.method === 'GET') {
+      return handleScreenerLatest(env, cors)
     }
     if (url.pathname === '/health') {
       return json({ status: 'ok' }, 200, cors)

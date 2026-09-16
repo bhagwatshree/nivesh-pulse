@@ -9,3 +9,10 @@ compatibility_date = "2026-01-01"
 [vars]
 UPSTOX_CLIENT_ID = "bf33a8bc-53c7-4172-bbf8-4423c98998b6"
 ALLOWED_ORIGINS = "https://bhagwatshree.github.io,http://localhost:5173"
+
+# Stores today's Upstox/Groww session token (for the GitHub Actions
+# screener scan to reuse — see /internal/* routes) and the latest published
+# screener results (for /screener/latest). Holds no data beyond that.
+[[kv_namespaces]]
+binding = "NIVESH_KV"
+id = "c6e5fb380b8e4415bd6312b6df41e036"

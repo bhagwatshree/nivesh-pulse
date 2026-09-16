@@ -1,0 +1,32 @@
+name: Nifty 50 screener scan
+
+# Every 5 minutes, roughly bracketing NSE session hours (09:15-15:30 IST =
+# 03:45-10:00 UTC) with margin. The script itself does the precise
+# market-hours check (src/lib/marketHours.ts) and exits cleanly outside
+# it, so the exact cron window here only needs to be a safe superset.
+on:
+  schedule:
+    - cron: '*/5 3-10 * * 1-5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: screener-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run screener:scan
+        env:
+          SCAN_SHARED_SECRET: ${{ secrets.SCAN_SHARED_SECRET }}

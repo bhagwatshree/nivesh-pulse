@@ -759,6 +759,31 @@ h3 {
 .allocation-total small { color: #929ca6; font-size: 7.5px; }
 .allocation-total strong { margin-top: 3px; color: #344255; font-size: 10.5px; font-variant-numeric: tabular-nums; }
 
+.screener-panel { padding: 18px; }
+.screener-disclaimer { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 16px; padding: 10px 12px; color: #6d5f35; border-radius: 9px; background: #fff9e8; font-size: 8.5px; line-height: 1.5; }
+.screener-disclaimer svg { flex: 0 0 auto; color: #a87c1f; margin-top: 1px; }
+.screener-empty { display: flex; min-height: 100px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 20px; color: #8a7456; text-align: center; }
+.screener-empty strong { color: #4a5566; font-size: 11px; }
+.screener-empty p { max-width: 380px; color: #8d97a2; font-size: 8.5px; line-height: 1.5; }
+.screener-table { border-top: 1px solid #e8ece9; }
+.screener-head, .screener-row { display: grid; grid-template-columns: 0.35fr minmax(140px, 1.2fr) 0.7fr 1fr 0.5fr 0.65fr 0.55fr; gap: 10px; align-items: center; }
+.screener-head { min-height: 33px; padding: 0 14px; color: #9ba4ae; background: #fafbfa; font-size: 7.5px; font-weight: 700; letter-spacing: 0.35px; text-transform: uppercase; }
+.screener-row { min-height: 52px; padding: 8px 14px; border-top: 1px solid #eef1ef; font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.screener-rank { color: #9ba4ae; font-weight: 700; }
+.screener-stock { display: flex; flex-direction: column; min-width: 0; }
+.screener-stock strong { color: #2a394b; font-size: 10px; }
+.screener-stock small { margin-top: 2px; overflow: hidden; color: #8d97a2; font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
+.screener-score { display: flex; flex-direction: column; gap: 3px; }
+.screener-score strong { color: #364456; font-size: 10.5px; }
+.screener-score small { color: #909aa5; font-size: 7.5px; }
+.screener-score i { display: block; width: 100%; max-width: 70px; height: 3px; overflow: hidden; border-radius: 3px; background: #edf0ef; }
+.screener-score i b { display: block; height: 100%; border-radius: inherit; background: #6076d4; }
+.screener-lean { display: inline-flex; align-items: center; justify-content: center; padding: 3px 8px; border-radius: 999px; font-size: 7.5px; font-weight: 750; letter-spacing: 0.3px; text-transform: uppercase; }
+.screener-lean-buy { color: var(--buy); background: var(--buy-pale); }
+.screener-lean-watch { color: var(--watch); background: var(--watch-pale); }
+.screener-lean-avoid { color: var(--exit); background: #fbe9ea; }
+.screener-updated { padding: 10px 14px 0; color: #9ba4ae; font-size: 7.5px; }
+
 .risk-panel { padding: 18px; }
 .risk-panel h3 { color: #1c2c3e; font-family: 'Manrope Variable', sans-serif; font-size: 16px; letter-spacing: -0.3px; }
 .shield-mark { display: inline-flex; width: 38px; height: 38px; align-items: center; justify-content: center; color: var(--buy); border-radius: 11px; background: var(--buy-pale); }
@@ -1153,6 +1178,8 @@ h3 {
   .allocation-head, .allocation-row { grid-template-columns: minmax(135px, 1.1fr) 0.45fr 0.9fr 0.65fr; }
   .allocation-head span:last-child, .allocation-row .table-action { display: none; }
   .factor-grid { grid-template-columns: 1fr 1fr; }
+  .screener-head, .screener-row { grid-template-columns: 0.3fr minmax(120px, 1.1fr) 0.6fr 0.9fr 0.55fr; }
+  .screener-head span:nth-child(6), .screener-row span:nth-child(6) { display: none; }
 }
 
 @media (max-width: 1020px) {
@@ -1238,6 +1265,9 @@ h3 {
   .allocation-head { display: none; }
   .allocation-row { grid-template-columns: minmax(118px, 1fr) 0.45fr 0.9fr; gap: 7px; padding: 11px 14px; }
   .allocation-row .risk-cell { display: none; }
+  .screener-head { display: none; }
+  .screener-row { grid-template-columns: 0.25fr minmax(100px, 1fr) 0.6fr 0.55fr; gap: 7px; padding: 10px 14px; }
+  .screener-row span:nth-child(3), .screener-row span:nth-child(5), .screener-row span:nth-child(6) { display: none; }
   .allocation-total { flex-wrap: wrap; gap: 13px 20px; padding: 12px 14px; }
   .allocation-total span { min-width: calc(50% - 10px); }
   .risk-panel { display: block; padding: 16px; }
