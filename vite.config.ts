@@ -30,10 +30,19 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Everything here is static, synthetic demo data — safe to cache
-        // aggressively so the installed app opens instantly, including
-        // offline. There is no live feed to go stale in the cache.
+        // The app shell (HTML/JS/CSS/fonts/icons) is precached so the
+        // installed app opens instantly, including offline. Live Upstox
+        // data is fetched at runtime straight from server/upstox-proxy —
+        // that traffic never goes through this cache, so precaching the
+        // shell doesn't risk serving stale prices.
         globPatterns: ['**/*.{js,css,html,woff2,png,svg,ico}'],
+        // Without these, an already-installed PWA can keep running its old
+        // service worker (and therefore the old app shell) until every open
+        // window/tab of it is fully closed, not just reloaded — a new
+        // deploy can silently not show up. This forces a new service worker
+        // to take over immediately on the next load instead of waiting.
+        skipWaiting: true,
+        clientsClaim: true,
       },
     }),
   ],
