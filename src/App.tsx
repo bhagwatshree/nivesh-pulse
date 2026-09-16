@@ -230,10 +230,10 @@ function App() {
         </button>
       </div>
       <div className="workspace-switcher">
-        <span className="avatar avatar-small">AK</span>
+        <span className="avatar avatar-small">DT</span>
         <span>
           <small>Workspace</small>
-          <strong>Personal research</strong>
+          <strong>Demo workspace</strong>
         </span>
         <ChevronDown size={15} />
       </div>
@@ -268,10 +268,10 @@ function App() {
         <span>Settings</span>
       </button>
       <div className="sidebar-profile">
-        <span className="avatar">AK</span>
+        <span className="avatar">DT</span>
         <span>
-          <strong>Arjun Kumar</strong>
-          <small>Paper portfolio</small>
+          <strong>Demo trader (sample profile)</strong>
+          <small>Paper portfolio · not you</small>
         </span>
         <ChevronRight size={16} />
       </div>
@@ -330,7 +330,7 @@ function App() {
               <Bell size={19} />
               <span className="unread-dot" />
             </button>
-            <span className="avatar avatar-top">AK</span>
+            <span className="avatar avatar-top">DT</span>
           </div>
         </header>
 
