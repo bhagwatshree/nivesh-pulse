@@ -1065,6 +1065,15 @@ h3 {
 .alert-status strong { color: #344657; font-size: 10px; }
 .alert-status p { margin-top: 3px; color: #7e8a96; font-size: 8px; }
 .alert-status button { padding: 5px 7px; color: var(--buy); border: 0; background: transparent; cursor: pointer; font-size: 8px; font-weight: 700; }
+
+.signal-pnl-summary { display: flex; flex-direction: column; gap: 2px; margin: 0 0 15px; padding: 11px; border-radius: 10px; }
+.signal-pnl-summary span { color: #7e8a96; font-size: 8px; }
+.signal-pnl-summary strong { font-size: 17px; }
+.signal-pnl-summary small { color: #96a1ac; font-size: 7.5px; }
+.signal-pnl-summary.positive { border: 1px solid #cfebe1; background: #f0faf6; }
+.signal-pnl-summary.positive strong { color: var(--buy); }
+.signal-pnl-summary.negative { border: 1px solid #f2cfd2; background: #fdf1f2; }
+.signal-pnl-summary.negative strong { color: var(--exit); }
 .notification-list { border-top: 1px solid var(--line); }
 .notification-item { display: grid; width: 100%; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; padding: 14px 2px; color: inherit; border: 0; border-bottom: 1px solid var(--line); background: transparent; cursor: pointer; text-align: left; }
 .notification-tone { display: block; width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 5px var(--brand-pale); }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   Activity,
   ArrowDownRight,
@@ -42,7 +42,6 @@ import {
   decisionProfiles,
   marketIndices,
   newsItems,
-  notifications,
   signals as fixtureSignals,
 } from './data/market'
 import { isGrowwConfigured } from './config/groww'
@@ -52,9 +51,11 @@ import { useGrowwCandles } from './hooks/useGrowwCandles'
 import { useGrowwQuotes } from './hooks/useGrowwQuotes'
 import { useGrowwSession } from './hooks/useGrowwSession'
 import { useLiveCandles } from './hooks/useLiveCandles'
+import { useLiveIndices } from './hooks/useLiveIndices'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
 import { useUpstoxSession } from './hooks/useUpstoxSession'
 import { inr } from './lib/allocation'
+import { computeSignalPnl, RESOLUTION_WINDOW_MS, type SignalNotification } from './lib/signalOutcome'
 import { canPlaceOrder } from './engine/orders'
 import { costGate } from './engine/costs'
 import { decide, type Decision } from './engine/decide'
@@ -232,6 +233,24 @@ function App() {
     activeProvider === 'upstox' ? liveQuotes.bySymbol : activeProvider === 'groww' ? growwQuotes.bySymbol : EMPTY_QUOTES
   const activeLiveCandles = activeProvider === 'upstox' ? liveCandles.candles : activeProvider === 'groww' ? growwCandles.candles : null
   const liveLastUpdated = activeProvider === 'upstox' ? liveQuotes.lastUpdated : activeProvider === 'groww' ? growwQuotes.lastUpdated : null
+  const activeProviderToken = activeProvider === 'upstox' ? upstoxSession.accessToken : activeProvider === 'groww' ? growwSession.accessToken : null
+  const liveIndices = useLiveIndices(activeProvider, activeProviderToken)
+  const effectiveIndices = useMemo(
+    () =>
+      marketIndices.map((index) => {
+        const live = liveIndices.indices?.find((item) => item.label === index.name)
+        if (!live || live.value <= 0) return index
+        return {
+          name: index.name,
+          value: live.value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+          change:
+            live.changePercent !== null
+              ? `${live.changePercent >= 0 ? '+' : '−'}${Math.abs(live.changePercent).toFixed(2)}%`
+              : index.change,
+        }
+      }),
+    [liveIndices.indices],
+  )
 
   const priceAdjustedSignals = useMemo(
     () => mergeLiveQuotes(fixtureSignals, liveQuotesBySymbol),
@@ -274,6 +293,94 @@ function App() {
       }),
     [priceAdjustedSignals, decisions],
   )
+
+  // Real signal notifications: fires when a symbol's computed decision
+  // actually changes (WAIT -> BUY, held -> EXIT, etc.), not a hardcoded
+  // fixture list. previousActionsRef tracks each symbol's last-seen action
+  // across renders purely to detect transitions — it holds no state the UI
+  // reads directly. The very first pass never fires anything (nothing to
+  // compare against yet), only genuine changes after that.
+  const [signalNotifications, setSignalNotifications] = useState<SignalNotification[]>([])
+  const previousActionsRef = useRef<Map<string, SignalAction>>(new Map())
+
+  useEffect(() => {
+    const previous = previousActionsRef.current
+    const fired: SignalNotification[] = []
+
+    for (const signal of priceAdjustedSignals) {
+      const decision = decisions.get(signal.symbol)
+      if (!decision) continue
+      const uiAction = decisionToUiAction(decision)
+      const prevAction = previous.get(signal.symbol)
+
+      if (prevAction !== undefined && prevAction !== uiAction) {
+        let quantity = 0
+        if (uiAction === 'BUY') {
+          quantity = allocate([signal], capital, DEFAULT_POLICY).allocations[0]?.quantity ?? 0
+        } else if (uiAction === 'EXIT') {
+          quantity = positions.find((position) => position.symbol === signal.symbol)?.quantity ?? 0
+        }
+        const firedAt = Date.now()
+        const resolvable = (uiAction === 'BUY' || uiAction === 'EXIT') && quantity > 0
+        fired.push({
+          id: `SN-${firedAt}-${signal.symbol}`,
+          symbol: signal.symbol,
+          company: signal.company,
+          action: uiAction,
+          detail:
+            uiAction === 'BUY'
+              ? `Score ${signal.score} cleared every entry gate.`
+              : uiAction === 'EXIT'
+                ? 'Exit condition triggered — protective level breached.'
+                : waitReasonCopy(decision) || 'Setup no longer confirmed.',
+          firedAt,
+          priceAtFire: signal.price,
+          quantity,
+          resolveAt: firedAt + RESOLUTION_WINDOW_MS,
+          status: resolvable ? 'pending' : 'not-applicable',
+        })
+      }
+      previous.set(signal.symbol, uiAction)
+    }
+
+    if (fired.length > 0) {
+      setSignalNotifications((current) => [...fired, ...current])
+    }
+  }, [decisions, priceAdjustedSignals, capital, positions])
+
+  // Resolves pending notifications 5 minutes after they fired: records the
+  // live price at that moment and the resulting shadow P&L (see
+  // src/lib/signalOutcome.ts — "what this would have earned if acted on
+  // promptly," independent of whether the user actually placed the paper
+  // order). Re-running this on every priceAdjustedSignals update (roughly
+  // every live-quote poll) is what supplies a fresh price to resolve
+  // against, rather than a separate always-on timer.
+  useEffect(() => {
+    const dueNotifications = signalNotifications.some(
+      (notification) => notification.status === 'pending' && Date.now() >= notification.resolveAt,
+    )
+    if (!dueNotifications) return
+
+    setSignalNotifications((current) =>
+      current.map((notification) => {
+        if (notification.status !== 'pending' || Date.now() < notification.resolveAt) return notification
+        const live = priceAdjustedSignals.find((signal) => signal.symbol === notification.symbol)
+        const priceAtResolve = live?.price ?? notification.priceAtFire
+        const pnl =
+          notification.action === 'WATCH'
+            ? 0
+            : computeSignalPnl(notification.action, notification.priceAtFire, priceAtResolve, notification.quantity)
+        return { ...notification, status: 'resolved' as const, priceAtResolve, pnl }
+      }),
+    )
+    // `now` (already ticking every second for the scan countdown) is a
+    // deliberate dependency here too: without it, a pending notification
+    // would never resolve while running on synthetic/disconnected data,
+    // since priceAdjustedSignals only changes when a live quote poll lands.
+  }, [priceAdjustedSignals, signalNotifications, now])
+
+  const resolvedSignalNotifications = signalNotifications.filter((notification) => notification.status === 'resolved')
+  const dailySignalPnl = resolvedSignalNotifications.reduce((sum, notification) => sum + (notification.pnl ?? 0), 0)
 
   const allocationPlan = useMemo(() => allocate(signals, capital, DEFAULT_POLICY), [signals, capital])
   const allocations = allocationPlan.allocations
@@ -480,7 +587,7 @@ function App() {
               aria-label="Open notifications"
             >
               <Bell size={19} />
-              <span className="unread-dot" />
+              {signalNotifications.length > 0 && <span className="unread-dot" />}
             </button>
             <span className="avatar avatar-top">DT</span>
           </div>
@@ -600,16 +707,20 @@ function App() {
             </div>
           </section>
 
-          <section className="market-tape" aria-label="Illustrative market indices">
-            <span className="tape-label"><Radio size={14} /> Demo snapshot</span>
-            {marketIndices.map((index) => (
+          <section className="market-tape" aria-label={liveIndices.indices ? 'Live market indices' : 'Illustrative market indices'}>
+            <span className="tape-label">
+              <Radio size={14} /> {liveIndices.indices ? `Live · ${activeProvider === 'upstox' ? 'Upstox' : 'Groww'}` : 'Demo snapshot'}
+            </span>
+            {effectiveIndices.map((index) => (
               <span className="index-tick" key={index.name}>
                 <small>{index.name}</small>
                 <strong>{index.value}</strong>
                 <em className={index.change.startsWith('+') ? 'positive' : 'negative'}>{index.change}</em>
               </span>
             ))}
-            <span className="data-time">Illustrative only—not live index data</span>
+            <span className="data-time">
+              {liveIndices.indices ? 'Live index quotes' : 'Illustrative only—not live index data'}
+            </span>
           </section>
 
           <section className="summary-grid" aria-label="Day summary">
@@ -1193,16 +1304,56 @@ function App() {
               <div><strong>{alertsPaused ? 'Alerts paused' : 'Alerts are active'}</strong><p>{alertsPaused ? 'No new signals will be surfaced.' : 'Next scan in ' + formatTimer(scanSeconds)}</p></div>
               <button onClick={() => setAlertsPaused((current) => !current)}>{alertsPaused ? 'Resume' : 'Pause'}</button>
             </div>
+            {resolvedSignalNotifications.length > 0 && (
+              <div className={dailySignalPnl >= 0 ? 'signal-pnl-summary positive' : 'signal-pnl-summary negative'}>
+                <span>Signal P&amp;L this session</span>
+                <strong>{dailySignalPnl >= 0 ? '+' : ''}{inr(dailySignalPnl, 2)}</strong>
+                <small>{resolvedSignalNotifications.length} resolved · mark-to-market at +5 min</small>
+              </div>
+            )}
             <div className="notification-list">
-              {notifications.map((notification) => (
-                <button className="notification-item" key={notification.id} onClick={() => setNotificationsOpen(false)}>
-                  <span className={`notification-tone ${notification.tone}`} />
-                  <span><strong>{notification.title}</strong><p>{notification.detail}</p><small>{notification.time}</small></span>
-                  <ChevronRight size={16} />
-                </button>
-              ))}
+              {signalNotifications.length === 0 ? (
+                <div className="empty-state">
+                  <CheckCircle2 size={23} />
+                  <strong>No signal changes yet</strong>
+                  <p>Real BUY/WAIT/EXIT changes will appear here as they happen this session.</p>
+                </div>
+              ) : (
+                signalNotifications.map((notification) => {
+                  const secondsToResolve = Math.max(0, Math.round((notification.resolveAt - now.getTime()) / 1000))
+                  const tone = notification.action === 'BUY' ? 'buy' : notification.action === 'EXIT' ? 'exit' : 'info'
+                  return (
+                    <button
+                      className="notification-item"
+                      key={notification.id}
+                      onClick={() => {
+                        setSelectedSymbol(notification.symbol)
+                        setNotificationsOpen(false)
+                        document.getElementById('overview')?.scrollIntoView({ behavior: 'smooth' })
+                      }}
+                    >
+                      <span className={`notification-tone ${tone}`} />
+                      <span>
+                        <strong>{notification.symbol} {actionLabel[notification.action]}</strong>
+                        <p>{notification.detail}</p>
+                        <small>
+                          {notification.status === 'resolved' && notification.pnl !== undefined
+                            ? `${notification.pnl >= 0 ? '+' : ''}${inr(notification.pnl, 2)} if acted on within 5 min`
+                            : notification.status === 'pending'
+                              ? `Resolving in ${formatTimer(secondsToResolve)}`
+                              : 'No sizeable quantity to track'}
+                        </small>
+                      </span>
+                      <ChevronRight size={16} />
+                    </button>
+                  )
+                })
+              )}
             </div>
-            <div className="drawer-footnote"><ShieldCheck size={16} /><p>Notifications always open the review screen. They never place an order.</p></div>
+            <div className="drawer-footnote">
+              <ShieldCheck size={16} />
+              <p>Opens the symbol's decision screen. Shadow P&amp;L reflects what a prompt paper order would have earned — it is not applied to your actual paper positions unless you separately confirm an order.</p>
+            </div>
           </aside>
         </>
       )}

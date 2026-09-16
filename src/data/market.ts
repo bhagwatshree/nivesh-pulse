@@ -222,29 +222,10 @@ export const newsItems = [
   },
 ]
 
-export const notifications = [
-  {
-    id: 1,
-    title: 'RELIANCE moved to BUY',
-    detail: 'VWAP reclaim confirmed on 1.7× volume.',
-    time: 'Now',
-    tone: 'buy',
-  },
-  {
-    id: 2,
-    title: 'Exit trigger · SBIN',
-    detail: 'Opening-range support failed at ₹816.20.',
-    time: '1 min',
-    tone: 'exit',
-  },
-  {
-    id: 3,
-    title: 'Capital plan refreshed',
-    detail: 'Allocation recalculated for whole-share quantities.',
-    time: '4 min',
-    tone: 'info',
-  },
-]
+// A fixture `notifications` array used to live here. It's superseded by
+// real ones generated from actual decision changes — see
+// src/lib/signalOutcome.ts and the notification-tracking effects in
+// App.tsx.
 
 export const marketIndices = [
   { name: 'NIFTY 50', value: '24,786.30', change: '+0.48%' },
