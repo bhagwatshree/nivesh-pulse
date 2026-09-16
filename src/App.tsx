@@ -45,12 +45,17 @@ import {
   notifications,
   signals as fixtureSignals,
 } from './data/market'
+import { isGrowwConfigured } from './config/groww'
 import { isUpstoxConfigured } from './config/upstox'
 import { mergeLiveQuotes } from './data/upstox/mergeSignals'
+import { useGrowwCandles } from './hooks/useGrowwCandles'
+import { useGrowwQuotes } from './hooks/useGrowwQuotes'
+import { useGrowwSession } from './hooks/useGrowwSession'
 import { useLiveCandles } from './hooks/useLiveCandles'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
 import { useUpstoxSession } from './hooks/useUpstoxSession'
 import { buildAllocation, inr } from './lib/allocation'
+import type { QuoteSnapshot } from './data/upstox/mappers'
 import type { PaperOrder, SignalAction, StockSignal } from './types'
 
 type NavId = 'overview' | 'signals' | 'plan' | 'insights' | 'history'
@@ -61,6 +66,11 @@ interface Position {
   averagePrice: number
   openedAt: string
 }
+
+// Stable empty-object reference so the `liveQuotesBySymbol` fallback below
+// doesn't create a new object identity on every render, which would defeat
+// the useMemo that depends on it.
+const EMPTY_QUOTES: Record<string, QuoteSnapshot> = {}
 
 const navItems: { id: NavId; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Today', icon: LayoutDashboard },
@@ -128,6 +138,7 @@ function App() {
   ])
   const [toast, setToast] = useState<string | null>(null)
   const [methodOpen, setMethodOpen] = useState(false)
+  const [growwTokenInput, setGrowwTokenInput] = useState('')
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -146,13 +157,28 @@ function App() {
   const upstoxSession = useUpstoxSession()
   const liveQuotes = useLiveQuotes(upstoxSession.accessToken)
   const liveCandles = useLiveCandles(upstoxSession.accessToken, selectedSymbol)
+  const growwSession = useGrowwSession()
+  const growwQuotes = useGrowwQuotes(growwSession.accessToken)
+  const growwCandles = useGrowwCandles(growwSession.accessToken, selectedSymbol)
+
+  // Upstox takes priority when both happen to be connected (it's the
+  // documented, durable integration; Groww's manual-token path is the
+  // quick validation route). Only one provider's prices feed the app at a
+  // time — mixing two live sources per symbol would be its own source of
+  // confusing, hard-to-audit numbers.
+  const activeProvider = upstoxSession.status === 'connected' ? 'upstox' : growwSession.status === 'connected' ? 'groww' : null
+  const liveQuotesBySymbol =
+    activeProvider === 'upstox' ? liveQuotes.bySymbol : activeProvider === 'groww' ? growwQuotes.bySymbol : EMPTY_QUOTES
+  const activeLiveCandles = activeProvider === 'upstox' ? liveCandles.candles : activeProvider === 'groww' ? growwCandles.candles : null
+  const liveLastUpdated = activeProvider === 'upstox' ? liveQuotes.lastUpdated : activeProvider === 'groww' ? growwQuotes.lastUpdated : null
+
   // Shadows the fixture import: every existing `signals.find/.filter/[0]`
   // usage below picks this up automatically. Live quotes overlay price and
   // changePercent only — score, entry/target/stop and thesis stay the
   // documented synthetic baseline (see mergeLiveQuotes for why).
   const signals = useMemo(
-    () => mergeLiveQuotes(fixtureSignals, liveQuotes.bySymbol),
-    [liveQuotes.bySymbol],
+    () => mergeLiveQuotes(fixtureSignals, liveQuotesBySymbol),
+    [liveQuotesBySymbol],
   )
 
   const allocations = useMemo(() => buildAllocation(signals, capital), [capital, signals])
@@ -353,20 +379,20 @@ function App() {
           </div>
         </header>
 
-        <div className={upstoxSession.status === 'connected' ? 'demo-notice demo-notice-live' : 'demo-notice'}>
-          {upstoxSession.status === 'connected' ? (
+        <div className={activeProvider ? 'demo-notice demo-notice-live' : 'demo-notice'}>
+          {activeProvider ? (
             <Wifi size={16} />
           ) : upstoxSession.status === 'error' ? (
             <TriangleAlert size={16} />
           ) : (
             <Info size={16} />
           )}
-          {upstoxSession.status === 'connected' ? (
+          {activeProvider ? (
             <p>
-              <strong>Live prices from Upstox.</strong> Scores, entries, stops and fills remain the synthetic
-              v0.3-demo baseline—not investment advice.
-              {liveQuotes.lastUpdated && (
-                <> Updated {Math.max(0, Math.round((now.getTime() - liveQuotes.lastUpdated.getTime()) / 1000))}s ago.</>
+              <strong>Live prices from {activeProvider === 'upstox' ? 'Upstox' : 'Groww'}.</strong> Scores, entries,
+              stops and fills remain the synthetic v0.3-demo baseline—not investment advice.
+              {liveLastUpdated && (
+                <> Updated {Math.max(0, Math.round((now.getTime() - liveLastUpdated.getTime()) / 1000))}s ago.</>
               )}
             </p>
           ) : upstoxSession.status === 'connecting' ? (
@@ -377,13 +403,13 @@ function App() {
             <p>
               <strong>Interface demo:</strong> prices, news, scores and fills are synthetic—not live market data or
               investment advice.
-              {isUpstoxConfigured && ' Connect Upstox below for live prices.'}
+              {(isUpstoxConfigured || isGrowwConfigured) && ' Connect a broker below for live prices.'}
             </p>
           )}
           {isUpstoxConfigured &&
             (upstoxSession.status === 'connected' ? (
               <button className="demo-notice-connect" onClick={upstoxSession.disconnect}>
-                <WifiOff size={13} /> Disconnect
+                <WifiOff size={13} /> Disconnect Upstox
               </button>
             ) : (
               <button
@@ -396,6 +422,51 @@ function App() {
             ))}
           <button onClick={() => setMethodOpen(true)}>How it works</button>
         </div>
+
+        {isGrowwConfigured && (
+          <div className={growwSession.status === 'connected' ? 'demo-notice demo-notice-live demo-notice-groww' : 'demo-notice demo-notice-groww'}>
+            {growwSession.status === 'connected' ? <Wifi size={16} /> : <Info size={16} />}
+            {growwSession.status === 'connected' ? (
+              <p>
+                <strong>Groww token active.</strong>
+                {activeProvider === 'groww' ? ' Feeding live prices.' : ' Upstox is connected, so Groww is on standby.'}
+                {' '}Expires ~6:00 AM IST daily—reconnect with a fresh token tomorrow.
+              </p>
+            ) : (
+              <>
+                <input
+                  type="password"
+                  className="groww-token-input"
+                  placeholder="Paste Groww access token"
+                  value={growwTokenInput}
+                  onChange={(event) => setGrowwTokenInput(event.target.value)}
+                  aria-label="Groww access token"
+                />
+              </>
+            )}
+            <button
+              className="demo-notice-connect"
+              onClick={() => {
+                if (growwSession.status === 'connected') {
+                  growwSession.disconnect()
+                } else if (growwTokenInput.trim()) {
+                  growwSession.setToken(growwTokenInput)
+                  setGrowwTokenInput('')
+                }
+              }}
+            >
+              {growwSession.status === 'connected' ? (
+                <>
+                  <WifiOff size={13} /> Disconnect Groww
+                </>
+              ) : (
+                <>
+                  <Wifi size={13} /> Connect Groww
+                </>
+              )}
+            </button>
+          </div>
+        )}
 
         <div className="page-wrap">
           <section id="overview" className="page-heading anchor-section">
@@ -502,7 +573,7 @@ function App() {
               </div>
               <CandlestickChart
                 key={selected.symbol}
-                candles={liveCandles.candles ?? selected.candles}
+                candles={activeLiveCandles ?? selected.candles}
                 symbol={selected.symbol}
                 positive={selected.changePercent >= 0}
               />

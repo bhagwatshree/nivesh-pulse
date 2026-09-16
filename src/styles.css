@@ -435,6 +435,11 @@ h3 {
 .demo-notice-live strong { color: #0f4a32; }
 .demo-notice-live button { color: #0f4a32; border-bottom-color: #7fc9a6; }
 
+.demo-notice-groww { border-top: 1px solid rgba(0, 0, 0, 0.05); }
+.groww-token-input { flex: 1; min-width: 0; padding: 5px 9px; color: #43331a; border: 1px solid #d9cfa8; border-radius: 6px; background: #fffdf5; font-size: 10px; }
+.groww-token-input:focus { outline: 2px solid #a87c1f; outline-offset: 1px; }
+.demo-notice-groww.demo-notice-live .groww-token-input { border-color: #7fc9a6; background: #f2fbf7; }
+
 .page-wrap {
   width: 100%;
   max-width: 1570px;

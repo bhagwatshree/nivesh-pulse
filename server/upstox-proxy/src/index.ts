@@ -1,12 +1,22 @@
-// Thin, stateless proxy in front of Upstox's REST API.
+// Thin, stateless proxy in front of Upstox's and Groww's REST APIs.
+// (Named upstox-proxy from when it only did one — the Groww routes were
+// added later as a same-shape passthrough; a rename is cosmetic cleanup,
+// not urgent.)
 //
-// It exists for exactly one reason: the OAuth authorization-code exchange
-// requires UPSTOX_CLIENT_SECRET, which must never reach the browser. Every
-// other route here (candles, quotes) does NOT need the secret — it just
-// forwards the caller's own bearer token to Upstox and relays the response,
-// which also sidesteps whatever CORS policy Upstox's API applies to direct
-// browser calls (unverified either way, and irrelevant once this proxy is
-// in the path).
+// For Upstox: exists because the OAuth authorization-code exchange
+// requires UPSTOX_CLIENT_SECRET, which must never reach the browser. The
+// candle/quote routes don't need the secret — they just forward the
+// caller's own bearer token to Upstox and relay the response, which also
+// sidesteps whatever CORS policy Upstox's API applies to direct browser
+// calls (unverified either way, and irrelevant once this proxy is in the
+// path).
+//
+// For Groww: no secret is involved at all in this pathway — the caller
+// pastes a token they generated themselves from Groww's dashboard. This
+// proxy exists purely because Groww's API doesn't send
+// Access-Control-Allow-Origin headers (confirmed by direct request — see
+// commit history), so a browser can't call it directly regardless of the
+// token being valid.
 //
 // This worker holds no state and no user data: it never stores an access
 // token, never sees anything beyond a single request/response.
@@ -18,6 +28,7 @@ export interface Env {
 }
 
 const UPSTOX_API = 'https://api.upstox.com'
+const GROWW_API = 'https://api.groww.in'
 
 function corsHeaders(origin: string | null, env: Env): HeadersInit {
   const allowed = env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
@@ -66,7 +77,20 @@ async function handleExchange(request: Request, env: Env, cors: HeadersInit): Pr
   })
 
   const data = await upstream.json()
-  // Deliberately not logged or persisted anywhere — relayed straight through.
+  // TEMPORARY debug logging (visible only via `wrangler tail`, never
+  // persisted) to diagnose a 401 during setup. Logs client_id and
+  // redirect_uri — both non-secret — and whatever Upstox says is wrong.
+  // Never logs client_secret or the authorization code. Remove once the
+  // flow is confirmed working end to end.
+  console.log(
+    'exchange debug ' +
+      JSON.stringify({
+        status: upstream.status,
+        client_id: env.UPSTOX_CLIENT_ID,
+        redirect_uri: body.redirect_uri,
+        upstoxResponse: data,
+      }),
+  )
   return json(data, upstream.status, cors)
 }
 
@@ -105,6 +129,55 @@ async function handleQuotes(request: Request, url: URL, cors: HeadersInit): Prom
   return json(data, upstream.status, cors)
 }
 
+async function handleGrowwQuote(request: Request, url: URL, cors: HeadersInit): Promise<Response> {
+  const auth = request.headers.get('Authorization')
+  if (!auth) return json({ error: 'missing_authorization_header' }, 401, cors)
+
+  const exchange = url.searchParams.get('exchange') ?? 'NSE'
+  const segment = url.searchParams.get('segment') ?? 'CASH'
+  const tradingSymbol = url.searchParams.get('trading_symbol')
+  if (!tradingSymbol) return json({ error: 'missing_trading_symbol' }, 400, cors)
+
+  const upstreamUrl =
+    `${GROWW_API}/v1/live-data/quote?exchange=${encodeURIComponent(exchange)}` +
+    `&segment=${encodeURIComponent(segment)}&trading_symbol=${encodeURIComponent(tradingSymbol)}`
+
+  const upstream = await fetch(upstreamUrl, {
+    headers: { Authorization: auth, Accept: 'application/json', 'X-API-VERSION': '1.0' },
+  })
+  const data = await upstream.json()
+  return json(data, upstream.status, cors)
+}
+
+async function handleGrowwCandles(request: Request, url: URL, cors: HeadersInit): Promise<Response> {
+  const auth = request.headers.get('Authorization')
+  if (!auth) return json({ error: 'missing_authorization_header' }, 401, cors)
+
+  const exchange = url.searchParams.get('exchange') ?? 'NSE'
+  const segment = url.searchParams.get('segment') ?? 'CASH'
+  const growwSymbol = url.searchParams.get('groww_symbol')
+  const startTime = url.searchParams.get('start_time')
+  const endTime = url.searchParams.get('end_time')
+  const candleInterval = url.searchParams.get('candle_interval') ?? '5minute'
+  if (!growwSymbol || !startTime || !endTime) {
+    return json({ error: 'missing_groww_symbol_or_time_range' }, 400, cors)
+  }
+
+  const params = new URLSearchParams({
+    exchange,
+    segment,
+    groww_symbol: growwSymbol,
+    start_time: startTime,
+    end_time: endTime,
+    candle_interval: candleInterval,
+  })
+  const upstream = await fetch(`${GROWW_API}/v1/historical/candles?${params.toString()}`, {
+    headers: { Authorization: auth, Accept: 'application/json', 'X-API-VERSION': '1.0' },
+  })
+  const data = await upstream.json()
+  return json(data, upstream.status, cors)
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get('Origin')
@@ -124,6 +197,12 @@ export default {
     }
     if (url.pathname === '/api/quotes' && request.method === 'GET') {
       return handleQuotes(request, url, cors)
+    }
+    if (url.pathname === '/groww/quote' && request.method === 'GET') {
+      return handleGrowwQuote(request, url, cors)
+    }
+    if (url.pathname === '/groww/candles' && request.method === 'GET') {
+      return handleGrowwCandles(request, url, cors)
     }
     if (url.pathname === '/health') {
       return json({ status: 'ok' }, 200, cors)
