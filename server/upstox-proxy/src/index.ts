@@ -77,20 +77,11 @@ async function handleExchange(request: Request, env: Env, cors: HeadersInit): Pr
   })
 
   const data = await upstream.json()
-  // TEMPORARY debug logging (visible only via `wrangler tail`, never
-  // persisted) to diagnose a 401 during setup. Logs client_id and
-  // redirect_uri — both non-secret — and whatever Upstox says is wrong.
-  // Never logs client_secret or the authorization code. Remove once the
-  // flow is confirmed working end to end.
-  console.log(
-    'exchange debug ' +
-      JSON.stringify({
-        status: upstream.status,
-        client_id: env.UPSTOX_CLIENT_ID,
-        redirect_uri: body.redirect_uri,
-        upstoxResponse: data,
-      }),
-  )
+  // Deliberately not logged or persisted anywhere — relayed straight
+  // through. (A prior version of this function logged the full upstream
+  // response for debugging, which included the live access_token — never
+  // log this response body. See git history if a status-only diagnostic is
+  // ever needed again; log upstream.status alone, never `data`.)
   return json(data, upstream.status, cors)
 }
 
