@@ -502,7 +502,7 @@ function App() {
                 <em className={index.change.startsWith('+') ? 'positive' : 'negative'}>{index.change}</em>
               </span>
             ))}
-            <span className="data-time">Data as of 10:42:31 IST</span>
+            <span className="data-time">Illustrative only—not live index data</span>
           </section>
 
           <section className="summary-grid" aria-label="Day summary">
