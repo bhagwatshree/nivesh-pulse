@@ -31,6 +31,8 @@ import {
   Sparkles,
   TriangleAlert,
   WalletCards,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react'
 import Brand from './components/Brand'
@@ -41,8 +43,13 @@ import {
   marketIndices,
   newsItems,
   notifications,
-  signals,
+  signals as fixtureSignals,
 } from './data/market'
+import { isUpstoxConfigured } from './config/upstox'
+import { mergeLiveQuotes } from './data/upstox/mergeSignals'
+import { useLiveCandles } from './hooks/useLiveCandles'
+import { useLiveQuotes } from './hooks/useLiveQuotes'
+import { useUpstoxSession } from './hooks/useUpstoxSession'
 import { buildAllocation, inr } from './lib/allocation'
 import type { PaperOrder, SignalAction, StockSignal } from './types'
 
@@ -106,7 +113,7 @@ function ScoreRing({ score }: { score: number }) {
 function App() {
   const [capital, setCapital] = useState(10_000)
   const [capitalInput, setCapitalInput] = useState('10000')
-  const [selectedSymbol, setSelectedSymbol] = useState(signals[0].symbol)
+  const [selectedSymbol, setSelectedSymbol] = useState(fixtureSignals[0].symbol)
   const [searchQuery, setSearchQuery] = useState('')
   const [activeNav, setActiveNav] = useState<NavId>('overview')
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -136,7 +143,19 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
-  const allocations = useMemo(() => buildAllocation(signals, capital), [capital])
+  const upstoxSession = useUpstoxSession()
+  const liveQuotes = useLiveQuotes(upstoxSession.accessToken)
+  const liveCandles = useLiveCandles(upstoxSession.accessToken, selectedSymbol)
+  // Shadows the fixture import: every existing `signals.find/.filter/[0]`
+  // usage below picks this up automatically. Live quotes overlay price and
+  // changePercent only — score, entry/target/stop and thesis stay the
+  // documented synthetic baseline (see mergeLiveQuotes for why).
+  const signals = useMemo(
+    () => mergeLiveQuotes(fixtureSignals, liveQuotes.bySymbol),
+    [liveQuotes.bySymbol],
+  )
+
+  const allocations = useMemo(() => buildAllocation(signals, capital), [capital, signals])
   const selected = signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0]
   const decisionProfile = decisionProfiles[selected.symbol]
   const selectedAllocation = allocations.find((item) => item.signal.symbol === selected.symbol)
@@ -334,9 +353,47 @@ function App() {
           </div>
         </header>
 
-        <div className="demo-notice">
-          <Info size={16} />
-          <p><strong>Interface demo:</strong> prices, news, scores and fills are synthetic—not live market data or investment advice.</p>
+        <div className={upstoxSession.status === 'connected' ? 'demo-notice demo-notice-live' : 'demo-notice'}>
+          {upstoxSession.status === 'connected' ? (
+            <Wifi size={16} />
+          ) : upstoxSession.status === 'error' ? (
+            <TriangleAlert size={16} />
+          ) : (
+            <Info size={16} />
+          )}
+          {upstoxSession.status === 'connected' ? (
+            <p>
+              <strong>Live prices from Upstox.</strong> Scores, entries, stops and fills remain the synthetic
+              v0.3-demo baseline—not investment advice.
+              {liveQuotes.lastUpdated && (
+                <> Updated {Math.max(0, Math.round((now.getTime() - liveQuotes.lastUpdated.getTime()) / 1000))}s ago.</>
+              )}
+            </p>
+          ) : upstoxSession.status === 'connecting' ? (
+            <p>Connecting to your Upstox account…</p>
+          ) : upstoxSession.status === 'error' ? (
+            <p><strong>Upstox connection failed:</strong> {upstoxSession.error}</p>
+          ) : (
+            <p>
+              <strong>Interface demo:</strong> prices, news, scores and fills are synthetic—not live market data or
+              investment advice.
+              {isUpstoxConfigured && ' Connect Upstox below for live prices.'}
+            </p>
+          )}
+          {isUpstoxConfigured &&
+            (upstoxSession.status === 'connected' ? (
+              <button className="demo-notice-connect" onClick={upstoxSession.disconnect}>
+                <WifiOff size={13} /> Disconnect
+              </button>
+            ) : (
+              <button
+                className="demo-notice-connect"
+                onClick={upstoxSession.connect}
+                disabled={upstoxSession.status === 'connecting'}
+              >
+                <Wifi size={13} /> {upstoxSession.status === 'error' ? 'Try again' : 'Connect Upstox'}
+              </button>
+            ))}
           <button onClick={() => setMethodOpen(true)}>How it works</button>
         </div>
 
@@ -445,7 +502,7 @@ function App() {
               </div>
               <CandlestickChart
                 key={selected.symbol}
-                candles={selected.candles}
+                candles={liveCandles.candles ?? selected.candles}
                 symbol={selected.symbol}
                 positive={selected.changePercent >= 0}
               />
