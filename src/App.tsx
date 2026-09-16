@@ -54,7 +54,13 @@ import { useGrowwSession } from './hooks/useGrowwSession'
 import { useLiveCandles } from './hooks/useLiveCandles'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
 import { useUpstoxSession } from './hooks/useUpstoxSession'
-import { buildAllocation, inr } from './lib/allocation'
+import { inr } from './lib/allocation'
+import { canPlaceOrder } from './engine/orders'
+import { costGate } from './engine/costs'
+import { decide, type Decision } from './engine/decide'
+import { evaluateGates, type GateResult } from './engine/gates'
+import { DEFAULT_POLICY } from './engine/policy'
+import { allocate } from './engine/size'
 import type { QuoteSnapshot } from './data/upstox/mappers'
 import type { PaperOrder, SignalAction, StockSignal } from './types'
 
@@ -95,6 +101,60 @@ const actionLabel: Record<SignalAction, 'BUY' | 'WAIT' | 'EXIT'> = {
   EXIT: 'EXIT',
 }
 
+/** engine/decide.ts's 'WAIT' maps to this UI's 'WATCH' — same state, older name here predates the engine. */
+function decisionToUiAction(decision: Decision): SignalAction {
+  if (decision.action === 'BUY') return 'BUY'
+  if (decision.action === 'EXIT') return 'EXIT'
+  return 'WATCH'
+}
+
+interface OrderTicket {
+  signal: StockSignal
+  side: 'BUY' | 'SELL'
+  quantity: number
+  price: number
+  maxLoss: number
+  estimatedPnl: number | null
+}
+
+/**
+ * A snapshot taken at the moment "Review" is clicked, not a live read of
+ * ambient `selected` state — the order modal renders only from this ticket.
+ * Previously the modal read `selected`/`orderQuantity`/`entryPrice`
+ * directly, which meant the confirm button would size and price against
+ * whatever symbol happened to be selected at confirm time rather than the
+ * one the modal was opened for. Every call site that opens the modal now
+ * builds one of these first.
+ */
+function buildOrderTicket(
+  signal: StockSignal,
+  allocation: { quantity: number } | undefined,
+  activePosition: Position | undefined,
+): OrderTicket | null {
+  const isExit = signal.action === 'EXIT'
+  const quantity = isExit ? activePosition?.quantity ?? 0 : allocation?.quantity ?? 0
+  if (quantity <= 0) return null
+  const price = isExit ? signal.price : (signal.entryLow + signal.entryHigh) / 2
+  const maxLoss = isExit ? 0 : Math.max(0, price - signal.stopLoss) * quantity
+  const estimatedPnl = isExit && activePosition ? (price - activePosition.averagePrice) * quantity : null
+  return { signal, side: isExit ? 'SELL' : 'BUY', quantity, price, maxLoss, estimatedPnl }
+}
+
+/** One human-readable line for why a WAIT decision is a WAIT, for the copy that used to just say "Wait for close." */
+function waitReasonCopy(decision: Decision): string {
+  if (decision.action !== 'WAIT') return ''
+  switch (decision.reason.kind) {
+    case 'NO_SIGNAL':
+      return decision.reason.detail
+    case 'GATE_FAILED':
+      return `${decision.reason.gate}: ${decision.reason.detail}`
+    case 'BELOW_THRESHOLD':
+      return `Score ${decision.reason.score} is below the ${decision.reason.threshold}-point BUY threshold.`
+    case 'POSITION_HELD':
+      return decision.reason.detail
+  }
+}
+
 function SignalBadge({ action }: { action: SignalAction }) {
   return (
     <span className={`signal-badge signal-${action.toLowerCase()}`}>
@@ -131,7 +191,8 @@ function App() {
   const [alertsPaused, setAlertsPaused] = useState(false)
   const [scanSeconds, setScanSeconds] = useState(165)
   const [now, setNow] = useState(new Date())
-  const [orderReview, setOrderReview] = useState<StockSignal | null>(null)
+  const [orderTicket, setOrderTicket] = useState<OrderTicket | null>(null)
+  const [reviewChecked, setReviewChecked] = useState(false)
   const [orders, setOrders] = useState<PaperOrder[]>([])
   const [positions, setPositions] = useState<Position[]>([
     { symbol: 'SBIN', quantity: 3, averagePrice: 821.2, openedAt: '10:07' },
@@ -172,37 +233,69 @@ function App() {
   const activeLiveCandles = activeProvider === 'upstox' ? liveCandles.candles : activeProvider === 'groww' ? growwCandles.candles : null
   const liveLastUpdated = activeProvider === 'upstox' ? liveQuotes.lastUpdated : activeProvider === 'groww' ? growwQuotes.lastUpdated : null
 
-  // Shadows the fixture import: every existing `signals.find/.filter/[0]`
-  // usage below picks this up automatically. Live quotes overlay price and
-  // changePercent only — score, entry/target/stop and thesis stay the
-  // documented synthetic baseline (see mergeLiveQuotes for why).
-  const signals = useMemo(
+  const priceAdjustedSignals = useMemo(
     () => mergeLiveQuotes(fixtureSignals, liveQuotesBySymbol),
     [liveQuotesBySymbol],
   )
 
-  const allocations = useMemo(() => buildAllocation(signals, capital), [capital, signals])
+  // The tested decision engine (src/engine/), run per symbol. Score,
+  // entry/target/stop and thesis stay the fixture's documented synthetic
+  // baseline (real technical-indicator scoring isn't built) — but the
+  // BUY/WAIT/EXIT call itself, and every gate behind it including the
+  // cost-adjusted-edge check, is genuinely computed, not hardcoded.
+  const decisions = useMemo(() => {
+    const map = new Map<string, Decision>()
+    for (const signal of priceAdjustedSignals) {
+      const profile = decisionProfiles[signal.symbol]
+      if (!profile) continue
+      const heldQuantity = positions.find((position) => position.symbol === signal.symbol)?.quantity ?? 0
+      const entry = (signal.entryLow + signal.entryHigh) / 2
+      // Approximates the quantity this signal alone would get at current
+      // capital, so the cost gate can run before the real multi-signal
+      // allocation (which only sizes signals already flagged BUY). Slightly
+      // optimistic versus the real joint allocation, since a signal sharing
+      // capital with two others may size smaller than this single-signal
+      // probe suggests — a documented approximation, not a silent one.
+      const candidateQuantity = allocate([signal], capital, DEFAULT_POLICY).allocations[0]?.quantity ?? 0
+      const gates: GateResult[] = [...evaluateGates(profile.checks), costGate(entry, signal.target, candidateQuantity)]
+      const exitTriggered = signal.price <= signal.stopLoss
+      map.set(signal.symbol, decide({ score: signal.score, gates, heldQuantity, exitTriggered }, DEFAULT_POLICY))
+    }
+    return map
+  }, [priceAdjustedSignals, positions, capital])
+
+  // Shadows the fixture import: every existing `signals.find/.filter/[0]`
+  // usage below picks this up automatically.
+  const signals = useMemo(
+    () =>
+      priceAdjustedSignals.map((signal) => {
+        const decision = decisions.get(signal.symbol)
+        return decision ? { ...signal, action: decisionToUiAction(decision) } : signal
+      }),
+    [priceAdjustedSignals, decisions],
+  )
+
+  const allocationPlan = useMemo(() => allocate(signals, capital, DEFAULT_POLICY), [signals, capital])
+  const allocations = allocationPlan.allocations
   const selected = signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0]
+  const selectedDecision = decisions.get(selected.symbol)
   const decisionProfile = decisionProfiles[selected.symbol]
   const selectedAllocation = allocations.find((item) => item.signal.symbol === selected.symbol)
-  const invested = allocations.reduce((sum, item) => sum + item.amount, 0)
-  const unallocated = Math.max(0, capital - invested)
-  const maxModeledLoss = allocations.reduce((sum, item) => {
-    const entry = (item.signal.entryLow + item.signal.entryHigh) / 2
-    return sum + Math.max(0, entry - item.signal.stopLoss) * item.quantity
-  }, 0)
-  const riskBudget = capital * 0.01
-  const riskUsed = Math.min(100, riskBudget ? (maxModeledLoss / riskBudget) * 100 : 0)
+  const invested = allocationPlan.invested
+  const unallocated = allocationPlan.unallocated
+  const maxModeledLoss = allocationPlan.totalModeledRisk
+  const riskBudget = allocationPlan.riskBudget
+  const riskUsed = allocationPlan.riskUtilisationPct
+  const riskBreached = allocationPlan.breaches.some((breach) => breach.kind === 'DAILY_RISK_BUDGET')
+  const buySignals = signals.filter((signal) => signal.action === 'BUY')
+  const strongBuyCount = buySignals.filter((signal) => signal.score >= 80).length
+  const developingBuyCount = buySignals.length - strongBuyCount
   const filteredSignals = signals.filter((signal) => {
     const query = searchQuery.trim().toLowerCase()
     return !query || signal.symbol.toLowerCase().includes(query) || signal.company.toLowerCase().includes(query)
   })
   const activePosition = positions.find((position) => position.symbol === selected.symbol)
   const orderQuantity = selected.action === 'EXIT' ? activePosition?.quantity ?? 0 : selectedAllocation?.quantity ?? 0
-  const entryPrice =
-    selected.action === 'EXIT' ? selected.price : (selected.entryLow + selected.entryHigh) / 2
-  const selectedMaxLoss =
-    selected.action === 'BUY' ? Math.max(0, entryPrice - selected.stopLoss) * orderQuantity : 0
   const totalPnl = positions.reduce((sum, position) => {
     const quote = signals.find((signal) => signal.symbol === position.symbol)?.price ?? position.averagePrice
     return sum + (quote - position.averagePrice) * position.quantity
@@ -222,48 +315,62 @@ function App() {
   }
 
   const confirmPaperOrder = () => {
-    if (!orderReview || orderQuantity <= 0) return
-    const side = orderReview.action === 'EXIT' ? 'SELL' : 'BUY'
+    if (!orderTicket || !reviewChecked) return
+    const { signal, side, quantity, price } = orderTicket
+
+    // Order-time enforcement, independent of whatever the plan looked like
+    // when the modal was opened — the position cap or averaging-down rule
+    // could have been crossed by another order placed in the meantime.
+    const check = canPlaceOrder({ symbol: signal.symbol, side, quantity }, positions, DEFAULT_POLICY)
+    if (!check.allowed) {
+      setToast(check.reason ?? 'Order blocked by risk policy.')
+      setOrderTicket(null)
+      setReviewChecked(false)
+      return
+    }
+
     const order: PaperOrder = {
       id: `NP-${String(orders.length + 1).padStart(3, '0')}`,
-      symbol: orderReview.symbol,
+      symbol: signal.symbol,
       side,
-      quantity: orderQuantity,
-      price: entryPrice,
+      quantity,
+      price,
       createdAt: new Date(),
       status: 'Filled',
     }
     setOrders((current) => [order, ...current])
 
     if (side === 'SELL') {
-      setPositions((current) => current.filter((position) => position.symbol !== orderReview.symbol))
+      setPositions((current) => current.filter((position) => position.symbol !== signal.symbol))
     } else {
       setPositions((current) => {
-        const existing = current.find((position) => position.symbol === orderReview.symbol)
+        // canPlaceOrder already rejected averaging down on an existing
+        // open position — this branch only runs for a genuinely new
+        // position, since a full exit removes the symbol from `positions`
+        // entirely rather than leaving a zero-quantity record behind.
+        const existing = current.find((position) => position.symbol === signal.symbol)
         if (!existing) {
           return [
             ...current,
             {
-              symbol: orderReview.symbol,
-              quantity: orderQuantity,
-              averagePrice: entryPrice,
+              symbol: signal.symbol,
+              quantity,
+              averagePrice: price,
               openedAt: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
             },
           ]
         }
-        const totalQuantity = existing.quantity + orderQuantity
-        const averagePrice =
-          (existing.quantity * existing.averagePrice + orderQuantity * entryPrice) / totalQuantity
+        const totalQuantity = existing.quantity + quantity
+        const averagePrice = (existing.quantity * existing.averagePrice + quantity * price) / totalQuantity
         return current.map((position) =>
-          position.symbol === orderReview.symbol
-            ? { ...position, quantity: totalQuantity, averagePrice }
-            : position,
+          position.symbol === signal.symbol ? { ...position, quantity: totalQuantity, averagePrice } : position,
         )
       })
     }
 
-    setToast(`${side === 'BUY' ? 'Paper buy' : 'Paper exit'} filled · ${orderQuantity} ${orderReview.symbol}`)
-    setOrderReview(null)
+    setToast(`${side === 'BUY' ? 'Paper buy' : 'Paper exit'} filled · ${quantity} ${signal.symbol}`)
+    setOrderTicket(null)
+    setReviewChecked(false)
   }
 
   const sidebar = (
@@ -521,17 +628,23 @@ function App() {
                 <span className="metric-label">Valid setups</span>
                 <span className="tiny-status">Now</span>
               </div>
-              <strong className="metric-value">3 <small>of 6</small></strong>
-              <span className="metric-note positive-note"><ArrowUpRight size={14} /> 2 strong · 1 developing</span>
+              <strong className="metric-value">{buySignals.length} <small>of {signals.length}</small></strong>
+              <span className={riskBreached ? 'metric-note negative-note' : 'metric-note positive-note'}>
+                <ArrowUpRight size={14} /> {strongBuyCount} strong · {developingBuyCount} developing
+              </span>
             </article>
             <article className="summary-card">
               <div className="summary-topline">
                 <span className="metric-icon amber"><ShieldCheck size={17} /></span>
                 <span className="metric-label">Daily risk budget</span>
-                <span className="metric-percent">{riskUsed.toFixed(0)}%</span>
+                <span className={riskBreached ? 'metric-percent metric-percent-breached' : 'metric-percent'}>
+                  {riskUsed.toFixed(0)}%
+                </span>
               </div>
               <strong className="metric-value">{inr(maxModeledLoss)} <small>modeled</small></strong>
-              <div className="risk-progress"><span style={{ width: `${riskUsed}%` }} /></div>
+              <div className={riskBreached ? 'risk-progress risk-progress-breached' : 'risk-progress'}>
+                <span style={{ width: `${Math.min(100, riskUsed)}%` }} />
+              </div>
             </article>
             <article className="summary-card countdown-card">
               <div className="summary-topline">
@@ -612,7 +725,7 @@ function App() {
                   <>
                     <div><span>Watch above</span><strong>{inr(selected.entryLow, 2)}</strong></div>
                     <div><span>Current price</span><strong>{inr(selected.price, 2)}</strong></div>
-                    <div><span>Missing</span><strong>Volume confirmation</strong></div>
+                    <div><span>Blocked by</span><strong>{selectedDecision ? waitReasonCopy(selectedDecision) : 'Confirmation pending'}</strong></div>
                     <div><span>Action</span><strong>No trade yet</strong></div>
                   </>
                 )}
@@ -632,7 +745,13 @@ function App() {
                 <button
                   className={`button full-width ${selected.action === 'EXIT' ? 'danger-button' : 'primary'}`}
                   disabled={orderQuantity <= 0}
-                  onClick={() => setOrderReview(selected)}
+                  onClick={() => {
+                    const ticket = buildOrderTicket(selected, selectedAllocation, activePosition)
+                    if (ticket) {
+                      setOrderTicket(ticket)
+                      setReviewChecked(false)
+                    }
+                  }}
                 >
                   <BookOpenCheck size={16} />
                   {selected.action === 'EXIT' ? 'Review paper exit' : `Review paper buy · ${orderQuantity} shares`}
@@ -757,7 +876,15 @@ function App() {
                           className="table-action"
                           onClick={() => {
                             setSelectedSymbol(item.signal.symbol)
-                            setOrderReview(item.signal)
+                            const ticket = buildOrderTicket(
+                              item.signal,
+                              item,
+                              positions.find((position) => position.symbol === item.signal.symbol),
+                            )
+                            if (ticket) {
+                              setOrderTicket(ticket)
+                              setReviewChecked(false)
+                            }
                           }}
                         >Review <ChevronRight size={14} /></button>
                       </div>
@@ -786,8 +913,8 @@ function App() {
                 </div>
                 <div className="risk-gauge-wrap">
                   <div
-                    className="risk-gauge"
-                    style={{ '--risk': `${riskUsed * 1.8}deg` } as CSSProperties}
+                    className={riskBreached ? 'risk-gauge risk-gauge-breached' : 'risk-gauge'}
+                    style={{ '--risk': `${Math.min(100, riskUsed) * 1.8}deg` } as CSSProperties}
                   >
                     <div><strong>{riskUsed.toFixed(0)}%</strong><span>budget used</span></div>
                   </div>
@@ -800,6 +927,21 @@ function App() {
                   <span><Check size={15} /> <b>0×</b> leverage</span>
                   <span><Check size={15} /> Exit before session close</span>
                 </div>
+                {riskBreached && (
+                  <div className="risk-callout risk-callout-warning">
+                    <TriangleAlert size={15} />
+                    <p><strong>Daily risk budget exceeded.</strong> Modeled plan loss is above the 1% cutoff — reduce capital or wait for a smaller-risk setup before confirming a new buy.</p>
+                  </div>
+                )}
+                {allocationPlan.droppedForPositionCap.length > 0 && (
+                  <div className="risk-callout risk-callout-warning">
+                    <TriangleAlert size={15} />
+                    <p>
+                      <strong>{allocationPlan.droppedForPositionCap.length} eligible setup(s) not funded</strong> by
+                      the 3-position cap: {allocationPlan.droppedForPositionCap.join(', ')}.
+                    </p>
+                  </div>
+                )}
                 <div className="risk-callout">
                   <Info size={15} />
                   <p>The unallocated remainder is intentional: NSE cash equities trade in whole shares, and every plan must pass the risk cap.</p>
@@ -980,8 +1122,15 @@ function App() {
                         <button onClick={() => {
                           if (quote) {
                             setSelectedSymbol(quote.symbol)
-                            if (quote.action === 'EXIT') setOrderReview(quote)
-                            else setToast(`No validated exit setup for ${quote.symbol}`)
+                            if (quote.action === 'EXIT') {
+                              const ticket = buildOrderTicket(quote, undefined, position)
+                              if (ticket) {
+                                setOrderTicket(ticket)
+                                setReviewChecked(false)
+                              }
+                            } else {
+                              setToast(`No validated exit setup for ${quote.symbol}`)
+                            }
                           }
                         }}>Review</button>
                       </div>
@@ -1058,41 +1207,68 @@ function App() {
         </>
       )}
 
-      {orderReview && (
+      {orderTicket && (
         <div className="modal-layer" role="presentation">
-          <button className="modal-backdrop" onClick={() => setOrderReview(null)} aria-label="Close order review" />
+          <button
+            className="modal-backdrop"
+            onClick={() => {
+              setOrderTicket(null)
+              setReviewChecked(false)
+            }}
+            aria-label="Close order review"
+          />
           <section className="order-modal" role="dialog" aria-modal="true" aria-labelledby="order-title">
             <div className="modal-header">
-              <span className={orderReview.action === 'EXIT' ? 'modal-icon exit' : 'modal-icon'}>
-                {orderReview.action === 'EXIT' ? <ArrowDownRight size={21} /> : <ArrowUpRight size={21} />}
+              <span className={orderTicket.side === 'SELL' ? 'modal-icon exit' : 'modal-icon'}>
+                {orderTicket.side === 'SELL' ? <ArrowDownRight size={21} /> : <ArrowUpRight size={21} />}
               </span>
-              <div><p className="eyebrow">Simulated execution</p><h2 id="order-title">Review paper {orderReview.action === 'EXIT' ? 'exit' : 'buy'}</h2></div>
-              <button className="icon-button" onClick={() => setOrderReview(null)} aria-label="Close order review"><X size={19} /></button>
+              <div><p className="eyebrow">Simulated execution</p><h2 id="order-title">Review paper {orderTicket.side === 'SELL' ? 'exit' : 'buy'}</h2></div>
+              <button
+                className="icon-button"
+                onClick={() => {
+                  setOrderTicket(null)
+                  setReviewChecked(false)
+                }}
+                aria-label="Close order review"
+              ><X size={19} /></button>
             </div>
             <div className="order-security">
-              <span className="stock-monogram">{orderReview.symbol.slice(0, 2)}</span>
-              <span><strong>{orderReview.symbol}</strong><small>{orderReview.company} · NSE</small></span>
-              <SignalBadge action={orderReview.action} />
+              <span className="stock-monogram">{orderTicket.signal.symbol.slice(0, 2)}</span>
+              <span><strong>{orderTicket.signal.symbol}</strong><small>{orderTicket.signal.company} · NSE</small></span>
+              <SignalBadge action={orderTicket.signal.action} />
             </div>
             <div className="order-summary-grid">
-              <div><span>Quantity</span><strong>{orderQuantity} shares</strong></div>
-              <div><span>Reference price</span><strong>{inr(entryPrice, 2)}</strong></div>
-              <div><span>Order value</span><strong>{inr(orderQuantity * entryPrice, 2)}</strong></div>
-              <div><span>{orderReview.action === 'EXIT' ? 'Estimated P&L' : 'Maximum modeled loss'}</span><strong className={orderReview.action === 'EXIT' ? 'text-exit' : ''}>
-                {orderReview.action === 'EXIT' && activePosition
-                  ? inr((entryPrice - activePosition.averagePrice) * activePosition.quantity, 2)
-                  : inr(selectedMaxLoss, 2)}
+              <div><span>Quantity</span><strong>{orderTicket.quantity} shares</strong></div>
+              <div><span>Reference price</span><strong>{inr(orderTicket.price, 2)}</strong></div>
+              <div><span>Order value</span><strong>{inr(orderTicket.quantity * orderTicket.price, 2)}</strong></div>
+              <div><span>{orderTicket.side === 'SELL' ? 'Estimated P&L' : 'Maximum modeled loss'}</span><strong className={orderTicket.side === 'SELL' ? 'text-exit' : ''}>
+                {orderTicket.side === 'SELL' && orderTicket.estimatedPnl !== null
+                  ? inr(orderTicket.estimatedPnl, 2)
+                  : inr(orderTicket.maxLoss, 2)}
               </strong></div>
             </div>
-            {orderReview.action !== 'EXIT' && (
-              <div className="order-level-line"><span>Protective stop <strong>{inr(orderReview.stopLoss, 2)}</strong></span><span>Indicative exit <strong>{inr(orderReview.target, 2)}</strong></span></div>
+            {orderTicket.side === 'BUY' && (
+              <div className="order-level-line"><span>Protective stop <strong>{inr(orderTicket.signal.stopLoss, 2)}</strong></span><span>Indicative exit <strong>{inr(orderTicket.signal.target, 2)}</strong></span></div>
             )}
             <div className="paper-warning"><ShieldCheck size={17} /><p><strong>Paper mode only.</strong> This records a simulated fill and never connects to a broker or exchange.</p></div>
-            <label className="review-check"><input type="checkbox" defaultChecked /><span>I reviewed quantity, price, stop and modeled risk.</span></label>
-            <button className={orderReview.action === 'EXIT' ? 'button full-width danger-button' : 'button full-width primary'} onClick={confirmPaperOrder} disabled={orderQuantity <= 0}>
-              <CheckCircle2 size={17} /> Confirm simulated {orderReview.action === 'EXIT' ? 'exit' : 'buy'}
+            <label className="review-check">
+              <input type="checkbox" checked={reviewChecked} onChange={(event) => setReviewChecked(event.target.checked)} />
+              <span>I reviewed quantity, price, stop and modeled risk.</span>
+            </label>
+            <button
+              className={orderTicket.side === 'SELL' ? 'button full-width danger-button' : 'button full-width primary'}
+              onClick={confirmPaperOrder}
+              disabled={!reviewChecked}
+            >
+              <CheckCircle2 size={17} /> Confirm simulated {orderTicket.side === 'SELL' ? 'exit' : 'buy'}
             </button>
-            <button className="text-button" onClick={() => setOrderReview(null)}>Cancel</button>
+            <button
+              className="text-button"
+              onClick={() => {
+                setOrderTicket(null)
+                setReviewChecked(false)
+              }}
+            >Cancel</button>
           </section>
         </div>
       )}

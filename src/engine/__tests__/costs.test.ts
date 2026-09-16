@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_COST_RATES, edgeSurvivesCosts, roundTripCosts } from '../costs'
+import { costGate, DEFAULT_COST_RATES, edgeSurvivesCosts, roundTripCosts } from '../costs'
 
 describe('roundTripCosts', () => {
   it('is zero for zero quantity', () => {
@@ -42,5 +42,22 @@ describe('edgeSurvivesCosts', () => {
   it('rejects zero or negative quantity', () => {
     expect(edgeSurvivesCosts(100, 110, 0)).toBe(false)
     expect(edgeSurvivesCosts(100, 110, -5)).toBe(false)
+  })
+})
+
+describe('costGate', () => {
+  it('is UNAVAILABLE, not FAIL, when quantity is zero — there is no trade to evaluate', () => {
+    const gate = costGate(1417.15, 1436.8, 0)
+    expect(gate.status).toBe('UNAVAILABLE')
+  })
+
+  it('reproduces the real RELIANCE-at-Rs10,000 finding: 2 shares does not clear costs', () => {
+    const gate = costGate(1417.15, 1436.8, 2)
+    expect(gate.status).toBe('FAIL')
+  })
+
+  it('reproduces the real RELIANCE-at-Rs20,000 finding: 5 shares clears costs', () => {
+    const gate = costGate(1417.15, 1436.8, 5)
+    expect(gate.status).toBe('PASS')
   })
 })

@@ -1,3 +1,5 @@
+import type { GateResult } from './gates'
+
 // Indian cash-equity intraday round-trip cost model.
 //
 // IMPORTANT: the rates in DEFAULT_COST_RATES are illustrative placeholders,
@@ -100,4 +102,37 @@ export function edgeSurvivesCosts(
   const grossEdge = (targetPrice - entryPrice) * quantity
   const costs = roundTripCosts(entryPrice, targetPrice, quantity, rates)
   return grossEdge > costs.total
+}
+
+/**
+ * Spec section 4's "expected edge remains positive after costs" as an
+ * entry gate: given the quantity current capital would actually buy, does
+ * the modeled move to target clear round-trip costs? A quantity of 0
+ * (capital too small for even one share) is UNAVAILABLE rather than FAIL —
+ * there's no trade to evaluate costs against, as distinct from a real trade
+ * that's sized but still a net loser after costs.
+ */
+export function costGate(
+  entryPrice: number,
+  targetPrice: number,
+  quantity: number,
+  rates: CostRates = DEFAULT_COST_RATES,
+): GateResult {
+  if (quantity <= 0) {
+    return {
+      label: 'Cost-adjusted edge',
+      status: 'UNAVAILABLE',
+      detail: 'No sizeable quantity at current capital.',
+    }
+  }
+  const survives = edgeSurvivesCosts(entryPrice, targetPrice, quantity, rates)
+  const costs = roundTripCosts(entryPrice, targetPrice, quantity, rates)
+  const grossEdge = (targetPrice - entryPrice) * quantity
+  return {
+    label: 'Cost-adjusted edge',
+    status: survives ? 'PASS' : 'FAIL',
+    detail: survives
+      ? `Modeled edge Rs${grossEdge.toFixed(2)} clears round-trip costs of Rs${costs.total.toFixed(2)}.`
+      : `Modeled edge Rs${grossEdge.toFixed(2)} does not clear round-trip costs of Rs${costs.total.toFixed(2)}.`,
+  }
 }

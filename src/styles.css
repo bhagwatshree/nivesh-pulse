@@ -576,12 +576,15 @@ h3 {
 .mini-link { margin-left: auto; padding: 0; color: var(--brand); border: 0; background: transparent; cursor: pointer; font-size: 9.5px; font-weight: 650; }
 .tiny-status { margin-left: auto; padding: 3px 6px; color: var(--buy); border-radius: 5px; background: var(--buy-pale); font-size: 8.5px; font-weight: 700; text-transform: uppercase; }
 .metric-percent { margin-left: auto; color: var(--watch); font-size: 10px; font-weight: 700; }
+.metric-percent-breached { color: var(--exit); }
 .metric-value { display: block; margin-top: 13px; color: #172639; font-family: 'Manrope Variable', sans-serif; font-size: 20px; font-weight: 720; font-variant-numeric: tabular-nums; letter-spacing: -0.55px; }
 .metric-value small { color: #8c96a3; font-family: 'DM Sans Variable', sans-serif; font-size: 9.5px; font-weight: 580; letter-spacing: 0; }
 .metric-note { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: #8a95a2; font-size: 9.5px; }
 .positive-note { color: var(--buy); }
+.negative-note { color: var(--exit); }
 .risk-progress { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 4px; background: #f0eee8; }
 .risk-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #e4b34d, #c98125); }
+.risk-progress-breached span { background: linear-gradient(90deg, #e07a7a, var(--exit)); }
 .live-label { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--buy); font-size: 8px; font-weight: 750; letter-spacing: 0.5px; }
 .live-label i { width: 5px; height: 5px; border-radius: 50%; background: var(--buy); }
 .mono { font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
@@ -761,6 +764,8 @@ h3 {
 .shield-mark { display: inline-flex; width: 38px; height: 38px; align-items: center; justify-content: center; color: var(--buy); border-radius: 11px; background: var(--buy-pale); }
 .risk-gauge-wrap { display: flex; align-items: center; justify-content: center; gap: 17px; margin: 18px 0; }
 .risk-gauge { display: flex; width: 90px; height: 90px; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 50%; background: conic-gradient(from 270deg, #d6a143 var(--risk), #edf0ee 0deg 180deg, transparent 180deg); clip-path: inset(0 0 50% 0); transform: translateY(21px); }
+.risk-gauge-breached { background: conic-gradient(from 270deg, var(--exit) var(--risk), #edf0ee 0deg 180deg, transparent 180deg); }
+.risk-gauge-breached strong { color: var(--exit); }
 .risk-gauge::before { position: absolute; content: ''; width: 70px; height: 70px; border-radius: 50%; background: #fff; }
 .risk-gauge div { z-index: 1; display: flex; flex-direction: column; align-items: center; transform: translateY(-4px); }
 .risk-gauge strong { color: #263649; font-size: 17px; }
@@ -773,6 +778,8 @@ h3 {
 .guardrail-list b { color: #354457; }
 .risk-callout { display: flex; align-items: flex-start; gap: 7px; margin-top: 17px; padding: 9px; color: #76694d; border-radius: 8px; background: #fff9e9; font-size: 8px; line-height: 1.45; }
 .risk-callout svg { flex: 0 0 auto; color: #b7852b; }
+.risk-callout-warning { color: #7a2c31; background: #fdecec; }
+.risk-callout-warning svg { color: var(--exit); }
 
 .research-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 13px; }
 .factor-panel, .news-panel { padding: 18px; }
