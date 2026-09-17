@@ -216,6 +216,7 @@ async function main() {
   if (provider === 'upstox') {
     try {
       const quotes = await fetchQuotesBatch([...instrumentKeyToSymbol.keys()], accessToken)
+      console.log(`DEBUG quotes returned: ${quotes.length}, sample: ${JSON.stringify(quotes.slice(0, 2))}`)
       for (const [instrumentKey, symbol] of instrumentKeyToSymbol) {
         const match = quotes.find((quote) => quote.key === instrumentKey || quote.key.includes(instrumentKey))
         if (match && typeof match.close === 'number' && match.close > 0) {
