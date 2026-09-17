@@ -42,10 +42,10 @@ import { dataSourcePlan, marketIndices, newsItems } from './data/market'
 import { isGrowwConfigured } from './config/groww'
 import { isUpstoxConfigured } from './config/upstox'
 import { mergeLiveQuotes } from './data/upstox/mergeSignals'
-import { useGrowwCandles } from './hooks/useGrowwCandles'
+import { useGrowwCandlesForSymbols } from './hooks/useGrowwCandlesForSymbols'
 import { useGrowwQuotes } from './hooks/useGrowwQuotes'
 import { useGrowwSession } from './hooks/useGrowwSession'
-import { useLiveCandles } from './hooks/useLiveCandles'
+import { useLiveCandlesForSymbols } from './hooks/useLiveCandlesForSymbols'
 import { useLiveIndices } from './hooks/useLiveIndices'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
 import { useScreener, type ScreenerPick } from './hooks/useScreener'
@@ -59,7 +59,7 @@ import { evaluateGates, type GateResult } from './engine/gates'
 import { buildLiveDecisionProfile, buildLiveSignal, LIVE_POLICY } from './engine/liveSignal'
 import { computeTechnicalScore } from './engine/technicals'
 import { allocate } from './engine/size'
-import type { PaperOrder, Position, SignalAction, StockSignal } from './types'
+import type { DecisionProfile, PaperOrder, Position, SignalAction, StockSignal } from './types'
 
 type NavId = 'overview' | 'signals' | 'screener' | 'plan' | 'insights' | 'history'
 
@@ -234,10 +234,8 @@ function App() {
 
   const upstoxSession = useUpstoxSession()
   const liveQuotes = useLiveQuotes(upstoxSession.accessToken)
-  const liveCandles = useLiveCandles(upstoxSession.accessToken, selectedSymbol)
   const growwSession = useGrowwSession()
   const growwQuotes = useGrowwQuotes(growwSession.accessToken)
-  const growwCandles = useGrowwCandles(growwSession.accessToken, selectedSymbol)
   const screener = useScreener()
 
   // Auto-select the scheduled scan's top real pick once one arrives,
@@ -268,7 +266,6 @@ function App() {
     () => ({ ...growwQuotes.bySymbol, ...liveQuotes.bySymbol }),
     [growwQuotes.bySymbol, liveQuotes.bySymbol],
   )
-  const activeLiveCandles = liveCandles.candles ?? growwCandles.candles
   const liveLastUpdated = [liveQuotes.lastUpdated, growwQuotes.lastUpdated]
     .filter((date): date is Date => date !== null)
     .sort((a, b) => b.getTime() - a.getTime())[0] ?? null
@@ -310,30 +307,41 @@ function App() {
     return bySymbol
   }, [screener.result, positions])
 
-  // Real signals (src/engine/liveSignal.ts): the selected symbol gets the
-  // fullest treatment (technicals + ATR computed from its live candles);
-  // every other listed symbol uses the scan's last published (coarser but
-  // still real) numbers, capped at WATCH, rather than a fresh per-symbol
-  // candle fetch on every poll. Nothing here is fixture data.
-  const priceAdjustedSignals = useMemo(() => {
-    const built: StockSignal[] = []
-    for (const [symbol, pick] of screenerPicksBySymbol) {
-      const candles = symbol === selectedSymbol ? (activeLiveCandles ?? null) : null
-      const signal = buildLiveSignal({ symbol, name: pick.name, candles, fallback: pick })
-      if (signal) built.push(signal)
-    }
-    return mergeLiveQuotes(built, liveQuotesBySymbol)
-  }, [screenerPicksBySymbol, selectedSymbol, activeLiveCandles, liveQuotesBySymbol])
-
-  const selectedTechnical = useMemo(
-    () => (activeLiveCandles ? computeTechnicalScore(activeLiveCandles) : null),
-    [activeLiveCandles],
+  // Symbols to fetch live candles for — the whole shortlist, not just
+  // whichever one is selected, so more than one name can genuinely clear
+  // the real BUY gates and the 3-position allocation plan can actually
+  // fill. One request per symbol (neither broker has a batch candle
+  // endpoint), run in parallel, on the same 60s cadence as the screener.
+  const shortlistSymbols = useMemo(() => Array.from(screenerPicksBySymbol.keys()), [screenerPicksBySymbol])
+  const liveCandlesMulti = useLiveCandlesForSymbols(upstoxSession.accessToken, shortlistSymbols)
+  const growwCandlesMulti = useGrowwCandlesForSymbols(growwSession.accessToken, shortlistSymbols)
+  // Same Upstox-preferred failover as liveQuotesBySymbol above.
+  const candlesBySymbol = useMemo(
+    () => ({ ...growwCandlesMulti.bySymbol, ...liveCandlesMulti.bySymbol }),
+    [growwCandlesMulti.bySymbol, liveCandlesMulti.bySymbol],
   )
-  // Real decision profile for whichever symbol is selected (full technical
-  // breakdown when live candles exist); every other symbol gets the same
-  // honest "not available" profile — no per-symbol candle fetch for the
-  // whole list, same reasoning as priceAdjustedSignals above.
-  const selectedDecisionProfile = useMemo(() => buildLiveDecisionProfile(selectedTechnical), [selectedTechnical])
+  const activeLiveCandles = candlesBySymbol[selectedSymbol] ?? null
+
+  // Real signals + decision profiles (src/engine/liveSignal.ts): full
+  // technicals from a symbol's own live candles when a broker session is
+  // connected, the scan's last published (coarser but still real) numbers
+  // otherwise. Nothing here is fixture data.
+  const { signalsBySymbol, profilesBySymbol } = useMemo(() => {
+    const signals = new Map<string, StockSignal>()
+    const profiles = new Map<string, DecisionProfile>()
+    for (const [symbol, pick] of screenerPicksBySymbol) {
+      const candles = candlesBySymbol[symbol] ?? null
+      const signal = buildLiveSignal({ symbol, name: pick.name, candles, fallback: pick })
+      if (signal) signals.set(symbol, signal)
+      profiles.set(symbol, buildLiveDecisionProfile(candles ? computeTechnicalScore(candles) : null))
+    }
+    return { signalsBySymbol: signals, profilesBySymbol: profiles }
+  }, [screenerPicksBySymbol, candlesBySymbol])
+
+  const priceAdjustedSignals = useMemo(
+    () => mergeLiveQuotes(Array.from(signalsBySymbol.values()), liveQuotesBySymbol),
+    [signalsBySymbol, liveQuotesBySymbol],
+  )
   const fallbackDecisionProfile = useMemo(() => buildLiveDecisionProfile(null), [])
 
   // The tested decision engine (src/engine/), run per symbol against
@@ -344,8 +352,7 @@ function App() {
   const decisions = useMemo(() => {
     const map = new Map<string, Decision>()
     for (const signal of priceAdjustedSignals) {
-      const isSelected = signal.symbol === selectedSymbol
-      const profile = isSelected ? selectedDecisionProfile : fallbackDecisionProfile
+      const profile = profilesBySymbol.get(signal.symbol) ?? fallbackDecisionProfile
       const heldPosition = positions.find((position) => position.symbol === signal.symbol)
       const heldQuantity = heldPosition?.quantity ?? 0
       const entry = (signal.entryLow + signal.entryHigh) / 2
@@ -365,7 +372,7 @@ function App() {
       map.set(signal.symbol, decide({ score: signal.score, gates, heldQuantity, exitTriggered }, LIVE_POLICY))
     }
     return map
-  }, [priceAdjustedSignals, positions, capital, selectedSymbol, selectedDecisionProfile, fallbackDecisionProfile])
+  }, [priceAdjustedSignals, positions, capital, profilesBySymbol, fallbackDecisionProfile])
 
   // Shadows the old fixture import: every existing `signals.find/.filter/[0]`
   // usage below picks this up automatically.
@@ -475,7 +482,7 @@ function App() {
   // the `signals[0]` fallback above, when `selectedSymbol` isn't in the
   // current list) gets the honest "not available" profile instead of a
   // mismatched one.
-  const decisionProfile = selected.symbol === selectedSymbol ? selectedDecisionProfile : fallbackDecisionProfile
+  const decisionProfile = profilesBySymbol.get(selected.symbol) ?? fallbackDecisionProfile
   const selectedAllocation = allocations.find((item) => item.signal.symbol === selected.symbol)
   const invested = allocationPlan.invested
   const unallocated = allocationPlan.unallocated
@@ -1203,7 +1210,12 @@ function App() {
                   })}
                   {allocations.length === 0 && (
                     <div className="allocation-empty">
-                      <TriangleAlert size={19} /> Capital is below the price and risk requirements for the current setups.
+                      <TriangleAlert size={19} />{' '}
+                      {buySignals.length === 0
+                        ? signals.length === 0
+                          ? "Waiting for the scheduled scan's first result today — nothing to allocate against yet."
+                          : 'No symbol currently clears every entry gate for a BUY — nothing to allocate right now.'
+                        : 'Capital is below the price and risk requirements for the current setups.'}
                     </div>
                   )}
                 </div>
