@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { upstoxConfig } from '../config/upstox'
-import { instrumentKeys } from '../data/instrumentKeys'
+import { nifty50Keys } from '../data/nifty50Keys'
 import { fetchQuotes } from '../data/upstox/client'
 import { mapQuoteResponse, type QuoteSnapshot } from '../data/upstox/mappers'
 
@@ -13,25 +13,38 @@ export interface LiveQuotes {
   lastUpdated: Date | null
 }
 
-/** Polls Upstox full-market-quote for the known fixture symbols while a session is active. */
-export function useLiveQuotes(accessToken: string | null): LiveQuotes {
+/**
+ * Polls Upstox's batch full-market-quote endpoint for whichever symbols
+ * are currently tracked (the full Nifty 50 universe, not just the old
+ * 6-symbol demo watchlist) while a session is active. This is what
+ * mergeSignals.ts uses to overlay a real day-over-day change % onto each
+ * signal — the previous close it needs lives here, not in the screener's
+ * own (candle-derived) numbers.
+ */
+export function useLiveQuotes(accessToken: string | null, symbols: string[]): LiveQuotes {
   const [bySymbol, setBySymbol] = useState<Record<string, QuoteSnapshot>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
   useEffect(() => {
-    if (!accessToken || !upstoxConfig) {
+    if (!accessToken || !upstoxConfig || symbols.length === 0) {
       setBySymbol({})
       return
     }
 
     let cancelled = false
     const proxyUrl = upstoxConfig.proxyUrl
-    const bySymbolInstrumentKey = Object.entries(instrumentKeys)
-    const keys = bySymbolInstrumentKey.map(([, info]) => info.instrumentKey)
+    const bySymbolInstrumentKey = symbols
+      .map((symbol): [string, string] | null => {
+        const instrumentKey = nifty50Keys[symbol]?.upstoxInstrumentKey
+        return instrumentKey ? [symbol, instrumentKey] : null
+      })
+      .filter((entry): entry is [string, string] => entry !== null)
+    const keys = bySymbolInstrumentKey.map(([, instrumentKey]) => instrumentKey)
 
     const load = async () => {
+      if (keys.length === 0) return
       setLoading(true)
       try {
         const raw = await fetchQuotes(proxyUrl, accessToken, keys)
@@ -39,18 +52,12 @@ export function useLiveQuotes(accessToken: string | null): LiveQuotes {
         if (cancelled) return
 
         const next: Record<string, QuoteSnapshot> = {}
-        for (const [symbol, info] of bySymbolInstrumentKey) {
+        for (const [symbol, instrumentKey] of bySymbolInstrumentKey) {
           // Upstox's response-object key format for `data` isn't pinned down
           // by the documentation this was built against, so match
-          // defensively against either the instrument key or the trading
-          // symbol appearing anywhere in the entry, rather than assuming one
-          // exact key shape.
-          const match = quotes.find(
-            (quote) =>
-              quote.key === info.instrumentKey ||
-              quote.key.includes(info.instrumentKey) ||
-              quote.symbol === info.upstoxTradingSymbol,
-          )
+          // defensively against the instrument key appearing anywhere in
+          // the entry, rather than assuming one exact key shape.
+          const match = quotes.find((quote) => quote.key === instrumentKey || quote.key.includes(instrumentKey))
           if (match) next[symbol] = match
         }
         setBySymbol(next)
@@ -69,7 +76,7 @@ export function useLiveQuotes(accessToken: string | null): LiveQuotes {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [accessToken])
+  }, [accessToken, symbols])
 
   return { bySymbol, loading, error, lastUpdated }
 }

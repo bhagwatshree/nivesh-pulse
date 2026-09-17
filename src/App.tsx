@@ -234,9 +234,7 @@ function App() {
   }, [toast])
 
   const upstoxSession = useUpstoxSession()
-  const liveQuotes = useLiveQuotes(upstoxSession.accessToken)
   const growwSession = useGrowwSession()
-  const growwQuotes = useGrowwQuotes(growwSession.accessToken)
   const screener = useScreener()
 
   // Auto-select the scheduled scan's top real pick once one arrives,
@@ -262,14 +260,6 @@ function App() {
   const anyLiveConnected = upstoxConnected || growwConnected
   const providerLabel =
     upstoxConnected && growwConnected ? 'Upstox + Groww' : upstoxConnected ? 'Upstox' : growwConnected ? 'Groww' : null
-
-  const liveQuotesBySymbol = useMemo(
-    () => ({ ...growwQuotes.bySymbol, ...liveQuotes.bySymbol }),
-    [growwQuotes.bySymbol, liveQuotes.bySymbol],
-  )
-  const liveLastUpdated = [liveQuotes.lastUpdated, growwQuotes.lastUpdated]
-    .filter((date): date is Date => date !== null)
-    .sort((a, b) => b.getTime() - a.getTime())[0] ?? null
 
   const liveIndices = useLiveIndices(upstoxSession.accessToken, growwSession.accessToken)
   const hasLiveIndices = Object.keys(liveIndices.byLabel).length > 0
@@ -335,12 +325,30 @@ function App() {
   const shortlistSymbols = useMemo(() => Array.from(trackedSymbols), [trackedSymbols])
   const liveCandlesMulti = useLiveCandlesForSymbols(upstoxSession.accessToken, shortlistSymbols)
   const growwCandlesMulti = useGrowwCandlesForSymbols(growwSession.accessToken, shortlistSymbols)
-  // Same Upstox-preferred failover as liveQuotesBySymbol above.
   const candlesBySymbol = useMemo(
     () => ({ ...growwCandlesMulti.bySymbol, ...liveCandlesMulti.bySymbol }),
     [growwCandlesMulti.bySymbol, liveCandlesMulti.bySymbol],
   )
   const activeLiveCandles = candlesBySymbol[selectedSymbol] ?? null
+
+  // Quotes carry the previous close, which is what a real day-over-day
+  // change % needs — candles alone only give an intraday reference.
+  // Automatic per-symbol failover: both providers fetch independently and
+  // continuously whenever their own session is connected (each hook is a
+  // no-op with no token). Upstox is preferred — it's the documented,
+  // durable integration — but for any symbol Upstox's fetch didn't return
+  // (an error, a gap, or simply not connected), Groww's value is used
+  // instead if available. Spreading Groww first then Upstox means Upstox
+  // always wins per key when both have one.
+  const liveQuotes = useLiveQuotes(upstoxSession.accessToken, shortlistSymbols)
+  const growwQuotes = useGrowwQuotes(growwSession.accessToken, shortlistSymbols)
+  const liveQuotesBySymbol = useMemo(
+    () => ({ ...growwQuotes.bySymbol, ...liveQuotes.bySymbol }),
+    [growwQuotes.bySymbol, liveQuotes.bySymbol],
+  )
+  const liveLastUpdated = [liveQuotes.lastUpdated, growwQuotes.lastUpdated]
+    .filter((date): date is Date => date !== null)
+    .sort((a, b) => b.getTime() - a.getTime())[0] ?? null
 
   // Real signals + decision profiles (src/engine/liveSignal.ts): full
   // technicals from a symbol's own live candles when a broker session is
