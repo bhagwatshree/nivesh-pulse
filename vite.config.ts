@@ -31,11 +31,24 @@ export default defineConfig({
       },
       workbox: {
         // The app shell (HTML/JS/CSS/fonts/icons) is precached so the
-        // installed app opens instantly, including offline. Live Upstox
-        // data is fetched at runtime straight from server/upstox-proxy —
-        // that traffic never goes through this cache, so precaching the
-        // shell doesn't risk serving stale prices.
+        // installed app opens instantly, including offline. Live
+        // Upstox/Groww/screener data is fetched at runtime straight from
+        // server/upstox-proxy — that traffic never goes through this cache,
+        // so precaching the shell doesn't risk serving stale prices.
         globPatterns: ['**/*.{js,css,html,woff2,png,svg,ico}'],
+        // Belt-and-suspenders for the above: explicitly forbid caching the
+        // proxy's own responses (quotes, candles, /screener/latest, the
+        // OAuth token routes), rather than relying only on it not being
+        // named in globPatterns. Prices/signals must always hit the
+        // network — a cached price or a cached BUY/EXIT signal is a
+        // correctness bug in a trading app, not an acceptable staleness
+        // trade-off the way a cached icon or font is.
+        runtimeCaching: [
+          {
+            urlPattern: /^https:\/\/nivesh-pulse-upstox-proxy\.bhagwatshree\.workers\.dev\/.*/,
+            handler: 'NetworkOnly',
+          },
+        ],
         // Without these, an already-installed PWA can keep running its old
         // service worker (and therefore the old app shell) until every open
         // window/tab of it is fully closed, not just reloaded — a new
