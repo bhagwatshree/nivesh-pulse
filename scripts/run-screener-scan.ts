@@ -216,9 +216,12 @@ async function main() {
   if (provider === 'upstox') {
     try {
       const quotes = await fetchQuotesBatch([...instrumentKeyToSymbol.keys()], accessToken)
-      console.log(`DEBUG quotes returned: ${quotes.length}, sample: ${JSON.stringify(quotes.slice(0, 2))}`)
-      for (const [instrumentKey, symbol] of instrumentKeyToSymbol) {
-        const match = quotes.find((quote) => quote.key === instrumentKey || quote.key.includes(instrumentKey))
+      for (const symbol of instrumentKeyToSymbol.values()) {
+        // Confirmed against a real response: Upstox's v2 quote endpoint
+        // keys/labels each entry by trading symbol (e.g. "NSE_EQ:WIPRO"),
+        // not by the ISIN-based instrument key sent in the request — so
+        // matching must go through `quote.symbol`, not the request key.
+        const match = quotes.find((quote) => quote.symbol === symbol)
         if (match && typeof match.close === 'number' && match.close > 0) {
           changePercentBySymbol.set(symbol, ((match.lastPrice - match.close) / match.close) * 100)
         }

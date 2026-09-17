@@ -52,12 +52,12 @@ export function useLiveQuotes(accessToken: string | null, symbols: string[]): Li
         if (cancelled) return
 
         const next: Record<string, QuoteSnapshot> = {}
-        for (const [symbol, instrumentKey] of bySymbolInstrumentKey) {
-          // Upstox's response-object key format for `data` isn't pinned down
-          // by the documentation this was built against, so match
-          // defensively against the instrument key appearing anywhere in
-          // the entry, rather than assuming one exact key shape.
-          const match = quotes.find((quote) => quote.key === instrumentKey || quote.key.includes(instrumentKey))
+        for (const [symbol] of bySymbolInstrumentKey) {
+          // Confirmed against a real response: Upstox's v2 quote endpoint
+          // keys/labels each entry by trading symbol (e.g. "NSE_EQ:WIPRO"),
+          // not by the ISIN-based instrument key sent in the request — so
+          // matching must go through `quote.symbol`, not the request key.
+          const match = quotes.find((quote) => quote.symbol === symbol)
           if (match) next[symbol] = match
         }
         setBySymbol(next)
