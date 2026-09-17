@@ -46,6 +46,20 @@ export interface Allocation {
   percent: number
 }
 
+export interface Position {
+  symbol: string
+  quantity: number
+  averagePrice: number
+  openedAt: string
+  /**
+   * Snapshotted from the signal at buy time, not re-derived live — a
+   * live, price-relative stop (price - k*ATR) sits below current price
+   * by construction and would never trigger if recomputed every render.
+   */
+  stopLoss: number
+  target: number
+}
+
 export interface PaperOrder {
   id: string
   symbol: string

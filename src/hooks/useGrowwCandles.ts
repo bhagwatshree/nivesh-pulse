@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { growwConfig } from '../config/groww'
 import { formatIstDateTime } from '../data/groww/istTime'
-import { growwInstruments } from '../data/growwInstruments'
+import { nifty50Keys } from '../data/nifty50Keys'
 import { fetchGrowwCandles } from '../data/groww/client'
 import { mapGrowwCandleResponse } from '../data/groww/mappers'
 import type { Candle } from '../types'
@@ -14,15 +14,20 @@ export interface LiveCandlesResult {
   error: string | null
 }
 
-/** Fetches Groww 5-minute candles for one symbol over a rolling recent window while a token is set. */
+/**
+ * Fetches Groww 5-minute candles for one symbol over a rolling recent
+ * window while a token is set. Looks up the Groww symbol across the full
+ * Nifty 50 universe (the same source scripts/run-screener-scan.ts scans),
+ * not just the old 6-symbol demo watchlist.
+ */
 export function useGrowwCandles(accessToken: string | null, symbol: string): LiveCandlesResult {
   const [candles, setCandles] = useState<Candle[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    const instrument = growwInstruments[symbol]
-    if (!accessToken || !growwConfig || !instrument) {
+    const growwSymbol = nifty50Keys[symbol]?.growwSymbol
+    if (!accessToken || !growwConfig || !growwSymbol) {
       setCandles(null)
       setError(null)
       return
@@ -36,7 +41,7 @@ export function useGrowwCandles(accessToken: string | null, symbol: string): Liv
     fetchGrowwCandles(
       growwConfig.proxyUrl,
       accessToken,
-      instrument.growwSymbol,
+      growwSymbol,
       formatIstDateTime(start),
       formatIstDateTime(end),
       '5minute',

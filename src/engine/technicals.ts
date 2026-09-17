@@ -105,6 +105,38 @@ function rsiTriangularScore(rsi: number): number {
   return rsi <= 65 ? (rsi - 50) / 15 : (80 - rsi) / 15
 }
 
+/**
+ * Wilder's Average True Range: the average, over `period` candles, of the
+ * true range (the widest of high-low, |high-prevClose|, |low-prevClose|).
+ * A real, standard volatility measure — used to size stops/targets off
+ * actual recent price movement instead of an arbitrary fixed rupee gap.
+ * Returns null with fewer than `period + 1` candles (no seed available).
+ */
+export function computeATR(candles: Candle[], period = 14): number | null {
+  if (candles.length < period + 1) return null
+
+  const trueRanges: number[] = []
+  for (let i = 1; i < candles.length; i++) {
+    const { high, low } = candles[i]
+    const prevClose = candles[i - 1].close
+    trueRanges.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)))
+  }
+
+  let atr = trueRanges.slice(0, period).reduce((sum, tr) => sum + tr, 0) / period
+  for (let i = period; i < trueRanges.length; i++) {
+    atr = (atr * (period - 1) + trueRanges[i]) / period
+  }
+  return atr
+}
+
+// Mirrors the screener's technical-only lean cutoffs (see
+// scripts/run-screener-scan.ts) so the app's live Signals panel and the
+// scheduled 50-stock scan can never quietly drift out of sync. Deliberately
+// against the 60-point technical-only score, NOT the DATA_AND_DECISION_SPEC.md
+// section 4 gated 70/100 threshold — see src/engine/liveSignal.ts for why.
+export const TECHNICAL_BUY_THRESHOLD = 36
+export const TECHNICAL_WATCH_THRESHOLD = 20
+
 export interface TechnicalScore {
   /** Sum of the three components below — out of 60, not 100. See module header. */
   total: number

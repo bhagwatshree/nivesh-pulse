@@ -9,7 +9,7 @@
 // cleanly (not an error) when the market is closed or no session token is
 // available today — both are expected, ordinary conditions, not failures.
 
-import { computeTechnicalScore } from '../src/engine/technicals'
+import { computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, TECHNICAL_WATCH_THRESHOLD } from '../src/engine/technicals'
 import { isNseMarketOpen } from '../src/lib/marketHours'
 import { mapCandleResponse } from '../src/data/upstox/mappers'
 import { mapGrowwCandleResponse } from '../src/data/groww/mappers'
@@ -92,8 +92,8 @@ interface ScreenerPick {
 // symbols with real entry/stop/target levels and live gate data, none of
 // which exist for an arbitrary universe-wide scan.
 function leanFor(score: number): ScreenerPick['lean'] {
-  if (score >= 36) return 'BUY'
-  if (score >= 20) return 'WATCH'
+  if (score >= TECHNICAL_BUY_THRESHOLD) return 'BUY'
+  if (score >= TECHNICAL_WATCH_THRESHOLD) return 'WATCH'
   return 'AVOID'
 }
 

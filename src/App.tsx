@@ -38,13 +38,7 @@ import {
 } from 'lucide-react'
 import Brand from './components/Brand'
 import CandlestickChart from './components/CandlestickChart'
-import {
-  dataSourcePlan,
-  decisionProfiles,
-  marketIndices,
-  newsItems,
-  signals as fixtureSignals,
-} from './data/market'
+import { dataSourcePlan, marketIndices, newsItems } from './data/market'
 import { isGrowwConfigured } from './config/groww'
 import { isUpstoxConfigured } from './config/upstox'
 import { mergeLiveQuotes } from './data/upstox/mergeSignals'
@@ -54,7 +48,7 @@ import { useGrowwSession } from './hooks/useGrowwSession'
 import { useLiveCandles } from './hooks/useLiveCandles'
 import { useLiveIndices } from './hooks/useLiveIndices'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
-import { useScreener } from './hooks/useScreener'
+import { useScreener, type ScreenerPick } from './hooks/useScreener'
 import { useUpstoxSession } from './hooks/useUpstoxSession'
 import { inr } from './lib/allocation'
 import { computeSignalPnl, RESOLUTION_WINDOW_MS, type SignalNotification } from './lib/signalOutcome'
@@ -62,19 +56,12 @@ import { canPlaceOrder } from './engine/orders'
 import { costGate } from './engine/costs'
 import { decide, type Decision } from './engine/decide'
 import { evaluateGates, type GateResult } from './engine/gates'
-import { DEFAULT_POLICY } from './engine/policy'
+import { buildLiveDecisionProfile, buildLiveSignal, LIVE_POLICY } from './engine/liveSignal'
+import { computeTechnicalScore } from './engine/technicals'
 import { allocate } from './engine/size'
-import type { PaperOrder, SignalAction, StockSignal } from './types'
+import type { PaperOrder, Position, SignalAction, StockSignal } from './types'
 
 type NavId = 'overview' | 'signals' | 'screener' | 'plan' | 'insights' | 'history'
-
-interface Position {
-  symbol: string
-  quantity: number
-  averagePrice: number
-  openedAt: string
-}
-
 
 const navItems: { id: NavId; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Today', icon: LayoutDashboard },
@@ -87,6 +74,34 @@ const navItems: { id: NavId; label: string; icon: typeof LayoutDashboard }[] = [
 
 const formatTimer = (seconds: number) =>
   `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+
+// Only used when the scheduled scan hasn't published anything yet
+// (screener.result is null/empty) and there's no held position either, so
+// there is genuinely no live signal to select — keeps `selected.symbol`
+// etc. safe without pretending there's real data behind it.
+const EMPTY_SIGNAL_PLACEHOLDER: StockSignal = {
+  symbol: '—',
+  company: 'Waiting for the next scan',
+  sector: '—',
+  exchange: 'NSE',
+  price: 0,
+  changePercent: 0,
+  action: 'WATCH',
+  score: 0,
+  entryLow: 0,
+  entryHigh: 0,
+  target: 0,
+  stopLoss: 0,
+  weight: 0,
+  horizon: '—',
+  riskReward: '—',
+  updatedAt: '—',
+  thesis: 'The scheduled 50-stock scan has not published a result yet. It runs every 5 minutes during market hours.',
+  caution: '—',
+  catalyst: 'Technical scan only — no live news or fundamentals feed.',
+  factors: [],
+  candles: [],
+}
 
 const actionCopy: Record<SignalAction, { verb: string; description: string }> = {
   BUY: { verb: 'Buy setup', description: 'Entry conditions are currently met' },
@@ -182,7 +197,10 @@ function ScoreRing({ score }: { score: number }) {
 function App() {
   const [capital, setCapital] = useState(10_000)
   const [capitalInput, setCapitalInput] = useState('10000')
-  const [selectedSymbol, setSelectedSymbol] = useState(fixtureSignals[0].symbol)
+  // Empty until the scheduled scan's first result arrives — see the
+  // auto-select effect below, which picks the top real result once one
+  // exists rather than defaulting to a hardcoded symbol.
+  const [selectedSymbol, setSelectedSymbol] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [activeNav, setActiveNav] = useState<NavId>('overview')
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -193,9 +211,9 @@ function App() {
   const [orderTicket, setOrderTicket] = useState<OrderTicket | null>(null)
   const [reviewChecked, setReviewChecked] = useState(false)
   const [orders, setOrders] = useState<PaperOrder[]>([])
-  const [positions, setPositions] = useState<Position[]>([
-    { symbol: 'SBIN', quantity: 3, averagePrice: 821.2, openedAt: '10:07' },
-  ])
+  // Starts empty rather than a seeded demo holding — a live signal engine
+  // shouldn't claim you're already holding a position you never bought.
+  const [positions, setPositions] = useState<Position[]>([])
   const [toast, setToast] = useState<string | null>(null)
   const [methodOpen, setMethodOpen] = useState(false)
   const [growwTokenInput, setGrowwTokenInput] = useState('')
@@ -221,6 +239,15 @@ function App() {
   const growwQuotes = useGrowwQuotes(growwSession.accessToken)
   const growwCandles = useGrowwCandles(growwSession.accessToken, selectedSymbol)
   const screener = useScreener()
+
+  // Auto-select the scheduled scan's top real pick once one arrives,
+  // rather than defaulting to a hardcoded symbol. Only runs while nothing
+  // is selected yet — never overrides a symbol the user actually clicked.
+  useEffect(() => {
+    if (selectedSymbol) return
+    const top = screener.result?.picks[0]
+    if (top) setSelectedSymbol(top.symbol)
+  }, [selectedSymbol, screener.result])
 
   // Automatic per-symbol failover: both providers fetch independently and
   // continuously whenever their own session is connected (each hook is a
@@ -265,22 +292,62 @@ function App() {
     [liveIndices.byLabel],
   )
 
-  const priceAdjustedSignals = useMemo(
-    () => mergeLiveQuotes(fixtureSignals, liveQuotesBySymbol),
-    [liveQuotesBySymbol],
-  )
+  // Which symbols get a live signal built: whatever the scheduled 50-stock
+  // scan (scripts/run-screener-scan.ts, published to /screener/latest)
+  // currently leans BUY or WATCH on, plus any symbol already held so a
+  // position can never silently drop out of view before its EXIT
+  // condition is checked, even if it fell out of the top 10 or to AVOID.
+  const screenerPicksBySymbol = useMemo(() => {
+    const bySymbol = new Map<string, ScreenerPick>()
+    for (const pick of screener.result?.picks ?? []) {
+      if (pick.lean !== 'AVOID') bySymbol.set(pick.symbol, pick)
+    }
+    for (const position of positions) {
+      if (bySymbol.has(position.symbol)) continue
+      const pick = screener.result?.picks.find((candidate) => candidate.symbol === position.symbol)
+      if (pick) bySymbol.set(position.symbol, pick)
+    }
+    return bySymbol
+  }, [screener.result, positions])
 
-  // The tested decision engine (src/engine/), run per symbol. Score,
-  // entry/target/stop and thesis stay the fixture's documented synthetic
-  // baseline (real technical-indicator scoring isn't built) — but the
+  // Real signals (src/engine/liveSignal.ts): the selected symbol gets the
+  // fullest treatment (technicals + ATR computed from its live candles);
+  // every other listed symbol uses the scan's last published (coarser but
+  // still real) numbers, capped at WATCH, rather than a fresh per-symbol
+  // candle fetch on every poll. Nothing here is fixture data.
+  const priceAdjustedSignals = useMemo(() => {
+    const built: StockSignal[] = []
+    for (const [symbol, pick] of screenerPicksBySymbol) {
+      const candles = symbol === selectedSymbol ? (activeLiveCandles ?? null) : null
+      const signal = buildLiveSignal({ symbol, name: pick.name, candles, fallback: pick })
+      if (signal) built.push(signal)
+    }
+    return mergeLiveQuotes(built, liveQuotesBySymbol)
+  }, [screenerPicksBySymbol, selectedSymbol, activeLiveCandles, liveQuotesBySymbol])
+
+  const selectedTechnical = useMemo(
+    () => (activeLiveCandles ? computeTechnicalScore(activeLiveCandles) : null),
+    [activeLiveCandles],
+  )
+  // Real decision profile for whichever symbol is selected (full technical
+  // breakdown when live candles exist); every other symbol gets the same
+  // honest "not available" profile — no per-symbol candle fetch for the
+  // whole list, same reasoning as priceAdjustedSignals above.
+  const selectedDecisionProfile = useMemo(() => buildLiveDecisionProfile(selectedTechnical), [selectedTechnical])
+  const fallbackDecisionProfile = useMemo(() => buildLiveDecisionProfile(null), [])
+
+  // The tested decision engine (src/engine/), run per symbol against
+  // LIVE_POLICY's technical-only BUY bar (see src/engine/liveSignal.ts for
+  // why DEFAULT_POLICY's full 70/100 threshold doesn't apply here) — the
   // BUY/WAIT/EXIT call itself, and every gate behind it including the
   // cost-adjusted-edge check, is genuinely computed, not hardcoded.
   const decisions = useMemo(() => {
     const map = new Map<string, Decision>()
     for (const signal of priceAdjustedSignals) {
-      const profile = decisionProfiles[signal.symbol]
-      if (!profile) continue
-      const heldQuantity = positions.find((position) => position.symbol === signal.symbol)?.quantity ?? 0
+      const isSelected = signal.symbol === selectedSymbol
+      const profile = isSelected ? selectedDecisionProfile : fallbackDecisionProfile
+      const heldPosition = positions.find((position) => position.symbol === signal.symbol)
+      const heldQuantity = heldPosition?.quantity ?? 0
       const entry = (signal.entryLow + signal.entryHigh) / 2
       // Approximates the quantity this signal alone would get at current
       // capital, so the cost gate can run before the real multi-signal
@@ -288,15 +355,19 @@ function App() {
       // optimistic versus the real joint allocation, since a signal sharing
       // capital with two others may size smaller than this single-signal
       // probe suggests — a documented approximation, not a silent one.
-      const candidateQuantity = allocate([signal], capital, DEFAULT_POLICY).allocations[0]?.quantity ?? 0
+      const candidateQuantity = allocate([signal], capital, LIVE_POLICY).allocations[0]?.quantity ?? 0
       const gates: GateResult[] = [...evaluateGates(profile.checks), costGate(entry, signal.target, candidateQuantity)]
-      const exitTriggered = signal.price <= signal.stopLoss
-      map.set(signal.symbol, decide({ score: signal.score, gates, heldQuantity, exitTriggered }, DEFAULT_POLICY))
+      // A held position's stop is pinned at buy time (see confirmPaperOrder)
+      // rather than re-derived from the live signal every render — a live,
+      // price-relative stop sits below current price by construction and
+      // would never trigger if recomputed fresh each time.
+      const exitTriggered = heldPosition ? signal.price <= heldPosition.stopLoss : false
+      map.set(signal.symbol, decide({ score: signal.score, gates, heldQuantity, exitTriggered }, LIVE_POLICY))
     }
     return map
-  }, [priceAdjustedSignals, positions, capital])
+  }, [priceAdjustedSignals, positions, capital, selectedSymbol, selectedDecisionProfile, fallbackDecisionProfile])
 
-  // Shadows the fixture import: every existing `signals.find/.filter/[0]`
+  // Shadows the old fixture import: every existing `signals.find/.filter/[0]`
   // usage below picks this up automatically.
   const signals = useMemo(
     () =>
@@ -329,7 +400,7 @@ function App() {
       if (prevAction !== undefined && prevAction !== uiAction) {
         let quantity = 0
         if (uiAction === 'BUY') {
-          quantity = allocate([signal], capital, DEFAULT_POLICY).allocations[0]?.quantity ?? 0
+          quantity = allocate([signal], capital, LIVE_POLICY).allocations[0]?.quantity ?? 0
         } else if (uiAction === 'EXIT') {
           quantity = positions.find((position) => position.symbol === signal.symbol)?.quantity ?? 0
         }
@@ -395,11 +466,16 @@ function App() {
   const resolvedSignalNotifications = signalNotifications.filter((notification) => notification.status === 'resolved')
   const dailySignalPnl = resolvedSignalNotifications.reduce((sum, notification) => sum + (notification.pnl ?? 0), 0)
 
-  const allocationPlan = useMemo(() => allocate(signals, capital, DEFAULT_POLICY), [signals, capital])
+  const allocationPlan = useMemo(() => allocate(signals, capital, LIVE_POLICY), [signals, capital])
   const allocations = allocationPlan.allocations
-  const selected = signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0]
+  const selected = signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0] ?? EMPTY_SIGNAL_PLACEHOLDER
   const selectedDecision = decisions.get(selected.symbol)
-  const decisionProfile = decisionProfiles[selected.symbol]
+  // selectedDecisionProfile is only genuinely computed for `selectedSymbol`
+  // itself (the one with live candles fetched) — anything else (including
+  // the `signals[0]` fallback above, when `selectedSymbol` isn't in the
+  // current list) gets the honest "not available" profile instead of a
+  // mismatched one.
+  const decisionProfile = selected.symbol === selectedSymbol ? selectedDecisionProfile : fallbackDecisionProfile
   const selectedAllocation = allocations.find((item) => item.signal.symbol === selected.symbol)
   const invested = allocationPlan.invested
   const unallocated = allocationPlan.unallocated
@@ -441,7 +517,7 @@ function App() {
     // Order-time enforcement, independent of whatever the plan looked like
     // when the modal was opened — the position cap or averaging-down rule
     // could have been crossed by another order placed in the meantime.
-    const check = canPlaceOrder({ symbol: signal.symbol, side, quantity }, positions, DEFAULT_POLICY)
+    const check = canPlaceOrder({ symbol: signal.symbol, side, quantity }, positions, LIVE_POLICY)
     if (!check.allowed) {
       setToast(check.reason ?? 'Order blocked by risk policy.')
       setOrderTicket(null)
@@ -477,6 +553,11 @@ function App() {
               quantity,
               averagePrice: price,
               openedAt: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+              // Pinned at buy time, not re-derived live — see the
+              // `decisions` memo above for why a live-recomputed stop would
+              // never trigger.
+              stopLoss: signal.stopLoss,
+              target: signal.target,
             },
           ]
         }
@@ -894,8 +975,18 @@ function App() {
                 <p className="eyebrow">Decision queue</p>
                 <h2>Signals worth your attention</h2>
               </div>
-              <span className="section-meta">6 liquid equities screened · 3 passed</span>
+              <span className="section-meta">
+                {screener.result?.scannedCount ?? 0} of {screener.result?.universeSize ?? 50} screened ·{' '}
+                {buySignals.length} passed
+              </span>
             </div>
+            {signals.length === 0 && (
+              <p className="score-disclaimer">
+                {screener.result?.generatedAt
+                  ? 'No symbol currently leans BUY or WATCH.'
+                  : "Waiting for the scheduled scan's first result today — it runs every 5 minutes during market hours."}
+              </p>
+            )}
             <div className="signal-strip">
               {filteredSignals.map((signal) => (
                 <button
@@ -956,8 +1047,10 @@ function App() {
                 <p>
                   Technical score only (max 60/100) — RSI, EMA 9/21, VWAP and volume z-score from real candles.
                   Market/sector, news, fundamentals and risk-quality evidence (the spec's other 40 points) aren't
-                  included. "Lean" is a ranking, not the gated BUY/WAIT/EXIT verdict the six tracked signals above
-                  use. Updates every 5 minutes during market hours, only on days a connected session exists.
+                  included. "Lean" is a ranking, not a gated verdict — the Signals panel above runs this same
+                  technical score through the real BUY/WAIT/EXIT engine (entry gates, a real ATR-based stop, and the
+                  cost-adjusted-edge check) for whichever symbol you select. Updates every 5 minutes during market
+                  hours, only on days a connected session exists.
                 </p>
               </div>
 

@@ -51,6 +51,20 @@ export default function CandlestickChart({ candles, symbol, positive }: Candlest
 
   const active = hovered === null ? candles.length - 1 : hovered
   const candle = candles[active]
+
+  if (!candle) {
+    return (
+      <div className="chart-shell">
+        <div className="chart-legend" aria-live="polite">
+          <span className="chart-symbol">{symbol}</span>
+        </div>
+        <div className="chart-empty-state">
+          No live candles yet — connect a broker session and select this symbol to load a real chart.
+        </div>
+      </div>
+    )
+  }
+
   const movement = candle.close - candle.open
 
   return (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Candle } from '../../types'
-import { computeEMA, computeRSI, computeTechnicalScore, computeVolumeZScore, computeVWAP } from '../technicals'
+import { computeATR, computeEMA, computeRSI, computeTechnicalScore, computeVolumeZScore, computeVWAP } from '../technicals'
 
 const candle = (open: number, high: number, low: number, close: number, volume: number, time = '09:15'): Candle => ({
   time,
@@ -145,5 +145,33 @@ describe('computeTechnicalScore', () => {
     }
     const score = computeTechnicalScore(candles)
     expect(score!.total).toBeLessThanOrEqual(score!.maxTotal)
+  })
+})
+
+describe('computeATR', () => {
+  it('returns null with fewer than period + 1 candles', () => {
+    const candles = [candle(9, 10, 8, 9, 10_000), candle(9, 11, 9, 10, 10_000), candle(10, 12, 10, 11, 10_000)]
+    expect(computeATR(candles, 14)).toBeNull()
+  })
+
+  it('matches a hand-computed 2-period ATR (seed only)', () => {
+    // TR1 (candle1 vs prevClose 9): max(11-9, |11-9|, |9-9|) = 2
+    // TR2 (candle2 vs prevClose 10): max(12-10, |12-10|, |10-10|) = 2
+    // seed atr = avg(TR1, TR2) = 2
+    const candles = [candle(9, 10, 8, 9, 10_000), candle(9, 11, 9, 10, 10_000), candle(10, 12, 10, 11.5, 10_000)]
+    expect(computeATR(candles, 2)).toBe(2)
+  })
+
+  it('matches a hand-computed 2-period ATR with one smoothing step', () => {
+    // TR1 = 2, TR2 = 2 (as above), seed atr = 2
+    // TR3 (candle3 vs prevClose 11): max(14-11, |14-11|, |11-11|) = 3
+    // atr = (2*(2-1) + 3) / 2 = 2.5
+    const candles = [
+      candle(9, 10, 8, 9, 10_000),
+      candle(9, 11, 9, 10, 10_000),
+      candle(10, 12, 10, 11, 10_000),
+      candle(11, 14, 11, 13, 10_000),
+    ]
+    expect(computeATR(candles, 2)).toBe(2.5)
   })
 })

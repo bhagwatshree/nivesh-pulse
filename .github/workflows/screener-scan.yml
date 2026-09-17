@@ -4,9 +4,17 @@ name: Nifty 50 screener scan
 # 03:45-10:00 UTC) with margin. The script itself does the precise
 # market-hours check (src/lib/marketHours.ts) and exits cleanly outside
 # it, so the exact cron window here only needs to be a safe superset.
+#
+# Offset to :07/:12/:17... rather than the round :00/:05/:10 marks:
+# GitHub's scheduler is documented to delay (or under load, silently drop)
+# runs at popular times, and huge numbers of repos schedule at exact round
+# 5-minute marks. In practice this workflow's schedule trigger never fired
+# even once on a round-minute cron across a full market session — only
+# manual workflow_dispatch runs did — so this offset is a real fix attempt,
+# not a stylistic preference.
 on:
   schedule:
-    - cron: '*/5 3-10 * * 1-5'
+    - cron: '7-59/5 3-10 * * 1-5'
   workflow_dispatch: {}
 
 permissions:

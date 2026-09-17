@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { upstoxConfig } from '../config/upstox'
-import { instrumentKeys } from '../data/instrumentKeys'
+import { nifty50Keys } from '../data/nifty50Keys'
 import { fetchIntradayCandles } from '../data/upstox/client'
 import { mapCandleResponse } from '../data/upstox/mappers'
 import type { Candle } from '../types'
@@ -11,15 +11,21 @@ export interface LiveCandles {
   error: string | null
 }
 
-/** Fetches live 5-minute intraday candles for one symbol while a session is active. */
+/**
+ * Fetches live 5-minute intraday candles for one symbol while a session is
+ * active. Looks up the instrument key across the full Nifty 50 universe
+ * (the same source scripts/run-screener-scan.ts scans), not just the old
+ * 6-symbol demo watchlist — so any symbol the screener surfaces can be
+ * selected here and get a real chart.
+ */
 export function useLiveCandles(accessToken: string | null, symbol: string): LiveCandles {
   const [candles, setCandles] = useState<Candle[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    const instrument = instrumentKeys[symbol]
-    if (!accessToken || !upstoxConfig || !instrument) {
+    const instrumentKey = nifty50Keys[symbol]?.upstoxInstrumentKey
+    if (!accessToken || !upstoxConfig || !instrumentKey) {
       setCandles(null)
       setError(null)
       return
@@ -27,7 +33,7 @@ export function useLiveCandles(accessToken: string | null, symbol: string): Live
 
     let cancelled = false
     setLoading(true)
-    fetchIntradayCandles(upstoxConfig.proxyUrl, accessToken, instrument.instrumentKey, 'minutes', '5')
+    fetchIntradayCandles(upstoxConfig.proxyUrl, accessToken, instrumentKey, 'minutes', '5')
       .then((raw) => {
         if (cancelled) return
         setCandles(mapCandleResponse(raw))
