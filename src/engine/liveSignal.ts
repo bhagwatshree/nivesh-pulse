@@ -86,14 +86,30 @@ export interface LiveSignalInput {
   candles: Candle[] | null
   /** The screener's last published (coarser, real) numbers for this symbol, used when `candles` isn't available. */
   fallback?: ScreenerPick
+  /**
+   * A real price actually observed for this symbol before (a held
+   * position's average buy price, or a pending notification's
+   * price-at-fire) — used only when neither `candles` nor `fallback` has
+   * anything, e.g. a held/pending symbol that dropped off the published
+   * top 10 with no broker session connected. Never a fabricated number.
+   */
+  lastKnownPrice?: number
 }
 
 /**
- * Builds a real StockSignal from live candles when available, or the
- * screener's last published numbers otherwise. Returns null only when
- * neither source has anything for this symbol.
+ * Builds a real StockSignal from live candles when available, the
+ * screener's last published numbers next, and a previously-observed last
+ * price as a final fallback so a held or pending-notification symbol
+ * never simply vanishes. Returns null only when none of the three exist.
  */
-export function buildLiveSignal({ symbol, name, sector, candles, fallback }: LiveSignalInput): StockSignal | null {
+export function buildLiveSignal({
+  symbol,
+  name,
+  sector,
+  candles,
+  fallback,
+  lastKnownPrice,
+}: LiveSignalInput): StockSignal | null {
   const technical = candles ? computeTechnicalScore(candles) : null
 
   if (technical && candles) {
@@ -167,6 +183,34 @@ export function buildLiveSignal({ symbol, name, sector, candles, fallback }: Liv
           tone: fallback.volumeZScore > 0.5 ? 'positive' : fallback.volumeZScore < -0.5 ? 'negative' : 'neutral',
         },
       ],
+      candles: [],
+    }
+  }
+
+  if (lastKnownPrice) {
+    return {
+      symbol,
+      company: name,
+      sector: sector ?? 'NSE-listed',
+      exchange: 'NSE',
+      price: lastKnownPrice,
+      changePercent: 0,
+      // Always WATCH — there is no live technical evidence at all here,
+      // only a stale reference price.
+      action: 'WATCH',
+      score: 0,
+      entryLow: lastKnownPrice,
+      entryHigh: lastKnownPrice,
+      target: lastKnownPrice,
+      stopLoss: lastKnownPrice,
+      weight: 0,
+      horizon: 'Intraday · 5-min bars',
+      riskReward: '—',
+      updatedAt: 'Last known price',
+      thesis: 'No live technical data currently available for this symbol — showing the last known price only.',
+      caution: 'Feed unavailable: connect a broker session or wait for this symbol to reappear in the scan.',
+      catalyst: 'Technical scan only — no live news or fundamentals feed.',
+      factors: [],
       candles: [],
     }
   }

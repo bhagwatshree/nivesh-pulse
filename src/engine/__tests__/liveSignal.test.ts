@@ -76,9 +76,23 @@ describe('buildLiveSignal', () => {
     expect(signal!.action).toBe('WATCH')
   })
 
-  it('returns null when neither live candles nor a screener fallback exist', () => {
+  it('returns null when neither live candles, a screener fallback, nor a last-known price exist', () => {
     const signal = buildLiveSignal({ symbol: 'TESTCO', name: 'Test Co Ltd.', candles: null, fallback: undefined })
     expect(signal).toBeNull()
+  })
+
+  it('falls back to a real last-known price (never fabricated) when a held/pending symbol has no other data', () => {
+    const signal = buildLiveSignal({
+      symbol: 'TESTCO',
+      name: 'Test Co Ltd.',
+      candles: null,
+      fallback: undefined,
+      lastKnownPrice: 312.5,
+    })
+    expect(signal).not.toBeNull()
+    expect(signal!.price).toBe(312.5)
+    expect(signal!.action).toBe('WATCH')
+    expect(signal!.score).toBe(0)
   })
 })
 

@@ -39,6 +39,7 @@ import {
 import Brand from './components/Brand'
 import CandlestickChart from './components/CandlestickChart'
 import { dataSourcePlan, marketIndices, newsItems } from './data/market'
+import { nifty50Keys } from './data/nifty50Keys'
 import { isGrowwConfigured } from './config/groww'
 import { isUpstoxConfigured } from './config/upstox'
 import { mergeLiveQuotes } from './data/upstox/mergeSignals'
@@ -289,30 +290,49 @@ function App() {
     [liveIndices.byLabel],
   )
 
+  // Declared here (ahead of the tracked-symbols computation below, which
+  // needs to know about pending notifications) rather than next to the
+  // effect that fires them further down.
+  const [signalNotifications, setSignalNotifications] = useState<SignalNotification[]>([])
+
   // Which symbols get a live signal built: whatever the scheduled 50-stock
   // scan (scripts/run-screener-scan.ts, published to /screener/latest)
-  // currently leans BUY or WATCH on, plus any symbol already held so a
-  // position can never silently drop out of view before its EXIT
-  // condition is checked, even if it fell out of the top 10 or to AVOID.
-  const screenerPicksBySymbol = useMemo(() => {
+  // currently leans BUY or WATCH on. screenerPickBySymbol is a plain
+  // lookup table (every published pick, any lean) used below to fill in
+  // real numbers where they're available; it does not itself decide who's
+  // tracked — trackedSymbols does.
+  const screenerPickBySymbol = useMemo(() => {
     const bySymbol = new Map<string, ScreenerPick>()
-    for (const pick of screener.result?.picks ?? []) {
-      if (pick.lean !== 'AVOID') bySymbol.set(pick.symbol, pick)
-    }
-    for (const position of positions) {
-      if (bySymbol.has(position.symbol)) continue
-      const pick = screener.result?.picks.find((candidate) => candidate.symbol === position.symbol)
-      if (pick) bySymbol.set(position.symbol, pick)
-    }
+    for (const pick of screener.result?.picks ?? []) bySymbol.set(pick.symbol, pick)
     return bySymbol
-  }, [screener.result, positions])
+  }, [screener.result])
 
-  // Symbols to fetch live candles for — the whole shortlist, not just
+  // Which symbols get tracked at all: whatever currently leans BUY/WATCH,
+  // plus any symbol already held (so a position can never silently drop
+  // out of view before its EXIT condition is checked, even after it falls
+  // out of the top 10 or to AVOID), plus any symbol with a signal
+  // notification still awaiting its 5-minute shadow-P&L resolution (see
+  // src/lib/signalOutcome.ts) — otherwise a fired BUY/EXIT that rotates
+  // out of the top 10 mid-window resolves against a stale price and
+  // silently records a wrong (usually zero) P&L instead of the real one.
+  const trackedSymbols = useMemo(() => {
+    const set = new Set<string>()
+    for (const pick of screener.result?.picks ?? []) {
+      if (pick.lean !== 'AVOID') set.add(pick.symbol)
+    }
+    for (const position of positions) set.add(position.symbol)
+    for (const notification of signalNotifications) {
+      if (notification.status === 'pending') set.add(notification.symbol)
+    }
+    return set
+  }, [screener.result, positions, signalNotifications])
+
+  // Symbols to fetch live candles for — the whole tracked set, not just
   // whichever one is selected, so more than one name can genuinely clear
   // the real BUY gates and the 3-position allocation plan can actually
   // fill. One request per symbol (neither broker has a batch candle
   // endpoint), run in parallel, on the same 60s cadence as the screener.
-  const shortlistSymbols = useMemo(() => Array.from(screenerPicksBySymbol.keys()), [screenerPicksBySymbol])
+  const shortlistSymbols = useMemo(() => Array.from(trackedSymbols), [trackedSymbols])
   const liveCandlesMulti = useLiveCandlesForSymbols(upstoxSession.accessToken, shortlistSymbols)
   const growwCandlesMulti = useGrowwCandlesForSymbols(growwSession.accessToken, shortlistSymbols)
   // Same Upstox-preferred failover as liveQuotesBySymbol above.
@@ -324,19 +344,31 @@ function App() {
 
   // Real signals + decision profiles (src/engine/liveSignal.ts): full
   // technicals from a symbol's own live candles when a broker session is
-  // connected, the scan's last published (coarser but still real) numbers
-  // otherwise. Nothing here is fixture data.
+  // connected; the scan's last published (coarser but still real) numbers
+  // when it isn't but the symbol is still in the top 10; and, failing
+  // both (a held/pending symbol that dropped off the published top 10
+  // with no session connected), the last real price we actually observed
+  // for it — a held position's average buy price, or a pending
+  // notification's price-at-fire — never a fabricated one. Nothing here
+  // is fixture data.
   const { signalsBySymbol, profilesBySymbol } = useMemo(() => {
     const signals = new Map<string, StockSignal>()
     const profiles = new Map<string, DecisionProfile>()
-    for (const [symbol, pick] of screenerPicksBySymbol) {
+    for (const symbol of trackedSymbols) {
       const candles = candlesBySymbol[symbol] ?? null
-      const signal = buildLiveSignal({ symbol, name: pick.name, candles, fallback: pick })
+      const pick = screenerPickBySymbol.get(symbol)
+      const heldPosition = positions.find((position) => position.symbol === symbol)
+      const pendingNotification = signalNotifications.find(
+        (notification) => notification.symbol === symbol && notification.status === 'pending',
+      )
+      const lastKnownPrice = heldPosition?.averagePrice ?? pendingNotification?.priceAtFire
+      const name = pick?.name ?? nifty50Keys[symbol]?.name ?? symbol
+      const signal = buildLiveSignal({ symbol, name, candles, fallback: pick, lastKnownPrice })
       if (signal) signals.set(symbol, signal)
       profiles.set(symbol, buildLiveDecisionProfile(candles ? computeTechnicalScore(candles) : null))
     }
     return { signalsBySymbol: signals, profilesBySymbol: profiles }
-  }, [screenerPicksBySymbol, candlesBySymbol])
+  }, [trackedSymbols, screenerPickBySymbol, candlesBySymbol, positions, signalNotifications])
 
   const priceAdjustedSignals = useMemo(
     () => mergeLiveQuotes(Array.from(signalsBySymbol.values()), liveQuotesBySymbol),
@@ -385,13 +417,11 @@ function App() {
     [priceAdjustedSignals, decisions],
   )
 
-  // Real signal notifications: fires when a symbol's computed decision
-  // actually changes (WAIT -> BUY, held -> EXIT, etc.), not a hardcoded
-  // fixture list. previousActionsRef tracks each symbol's last-seen action
-  // across renders purely to detect transitions — it holds no state the UI
-  // reads directly. The very first pass never fires anything (nothing to
-  // compare against yet), only genuine changes after that.
-  const [signalNotifications, setSignalNotifications] = useState<SignalNotification[]>([])
+  // previousActionsRef tracks each symbol's last-seen action across
+  // renders purely to detect transitions for the notification effect below
+  // — it holds no state the UI reads directly. The very first pass never
+  // fires anything (nothing to compare against yet), only genuine changes
+  // after that.
   const previousActionsRef = useRef<Map<string, SignalAction>>(new Map())
 
   useEffect(() => {
