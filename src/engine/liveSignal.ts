@@ -1,9 +1,11 @@
 import type { ScreenerPick } from '../hooks/useScreener'
 import type {
   Candle,
+  CorporateAction,
   DecisionCheck,
   DecisionContribution,
   DecisionProfile,
+  NewsArticle,
   SignalAction,
   SignalFactor,
   StockSignal,
@@ -237,10 +239,19 @@ const UNAVAILABLE_PEER_GROUP = 'Not available — no live fundamentals/peer feed
 /**
  * Builds a real DecisionProfile from live technicals when available.
  * Market & sector / News & events / Peer fundamentals / Risk quality stay
- * explicitly "not available" (score 0, disclosed) rather than faked —
- * mirroring DATA_AND_DECISION_SPEC.md's UNAVAILABLE coverage state.
+ * explicitly "not available" as *scored components* (score 0, disclosed)
+ * rather than faked — mirroring DATA_AND_DECISION_SPEC.md's UNAVAILABLE
+ * coverage state. Real corporate actions/news (when passed in) are
+ * attached as `newsEvents` for informational display instead — see the
+ * field's own comment in src/types.ts for why they aren't scored.
  */
-export function buildLiveDecisionProfile(technical: TechnicalScore | null): DecisionProfile {
+export function buildLiveDecisionProfile(
+  technical: TechnicalScore | null,
+  corporateActions: CorporateAction[] = [],
+  news: NewsArticle[] = [],
+): DecisionProfile {
+  const newsEvents = corporateActions.length > 0 || news.length > 0 ? { corporateActions, news } : undefined
+
   if (technical) {
     const components: DecisionContribution[] = [
       {
@@ -294,7 +305,7 @@ export function buildLiveDecisionProfile(technical: TechnicalScore | null): Deci
       },
     ]
 
-    return { components, checks, peerGroup: UNAVAILABLE_PEER_GROUP, peerMetrics: [] }
+    return { components, checks, peerGroup: UNAVAILABLE_PEER_GROUP, peerMetrics: [], newsEvents }
   }
 
   return {
@@ -310,5 +321,6 @@ export function buildLiveDecisionProfile(technical: TechnicalScore | null): Deci
     checks: [NO_LIVE_FEED_CHECK],
     peerGroup: UNAVAILABLE_PEER_GROUP,
     peerMetrics: [],
+    newsEvents,
   }
 }

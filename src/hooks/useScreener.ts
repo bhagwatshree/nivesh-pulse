@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { growwConfig } from '../config/groww'
 import { upstoxConfig } from '../config/upstox'
+import type { CorporateAction, NewsArticle } from '../types'
 
 const REFRESH_MS = 60_000
 
@@ -21,6 +22,10 @@ export interface ScreenerResult {
   universeSize?: number
   scannedCount?: number
   picks: ScreenerPick[]
+  /** Real Upstox Corporate Actions API data per symbol — absent on a Groww-only day. */
+  corporateActionsBySymbol?: Record<string, CorporateAction[]>
+  /** Real Upstox News API data per symbol — absent on a Groww-only day. */
+  newsBySymbol?: Record<string, NewsArticle[]>
 }
 
 export interface UseScreenerResult {

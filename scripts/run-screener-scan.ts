@@ -15,7 +15,7 @@ import { mapCandleResponse } from '../src/data/upstox/mappers'
 import { mapGrowwCandleResponse } from '../src/data/groww/mappers'
 import { formatIstDateTime } from '../src/data/groww/istTime'
 import { nifty50Keys } from '../src/data/nifty50Keys'
-import type { Candle } from '../src/types'
+import type { Candle, CorporateAction, NewsArticle } from '../src/types'
 
 const PROXY_URL = process.env.PROXY_URL ?? 'https://nivesh-pulse-upstox-proxy.bhagwatshree.workers.dev'
 const SCAN_SHARED_SECRET = process.env.SCAN_SHARED_SECRET
@@ -53,6 +53,65 @@ async function fetchUpstoxCandles(instrumentKey: string, accessToken: string): P
   })
   if (!response.ok) throw new Error(`Upstox candles HTTP ${response.status}`)
   return mapCandleResponse(await response.json())
+}
+
+interface UpstoxCorporateActionsResponse {
+  data?: { name: string; expiry_date: string; amount: number | null; ratio: string | null }[]
+}
+
+/**
+ * Real corporate actions (dividends, bonuses, splits, rights) from
+ * Upstox's official, documented Corporate Actions API — not a scrape.
+ * See docs/DATA_AND_DECISION_SPEC.md's "Official announcements" row.
+ */
+async function fetchCorporateActions(isin: string, accessToken: string): Promise<CorporateAction[]> {
+  const url = `https://api.upstox.com/v2/fundamentals/${encodeURIComponent(isin)}/corporate-actions`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+  })
+  if (!response.ok) throw new Error(`Upstox corporate-actions HTTP ${response.status}`)
+  const body = (await response.json()) as UpstoxCorporateActionsResponse
+  return (body.data ?? []).map((event) => ({
+    name: event.name,
+    expiryDate: event.expiry_date,
+    amount: event.amount,
+    ratio: event.ratio,
+  }))
+}
+
+interface UpstoxNewsResponse {
+  data?: Record<
+    string,
+    { heading: string; summary: string; article_link: string; published_time: number }[]
+  >
+}
+
+/**
+ * Real per-stock news (headline, summary, link, published time) from
+ * Upstox's official News API — covers the spec's "India-focused news"
+ * row, for which no adequate free source otherwise exists. Past 7 days
+ * only, up to 30 instrument keys per call.
+ */
+async function fetchNewsBatch(
+  instrumentKeys: string[],
+  accessToken: string,
+): Promise<Record<string, NewsArticle[]>> {
+  const params = new URLSearchParams({ category: 'instrument_keys', instrument_keys: instrumentKeys.join(',') })
+  const response = await fetch(`https://api.upstox.com/v2/news?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+  })
+  if (!response.ok) throw new Error(`Upstox news HTTP ${response.status}`)
+  const body = (await response.json()) as UpstoxNewsResponse
+  const out: Record<string, NewsArticle[]> = {}
+  for (const [instrumentKey, articles] of Object.entries(body.data ?? {})) {
+    out[instrumentKey] = articles.map((article) => ({
+      heading: article.heading,
+      summary: article.summary,
+      articleLink: article.article_link,
+      publishedAtMs: article.published_time,
+    }))
+  }
+  return out
 }
 
 async function fetchGrowwCandlesDirect(growwSymbol: string, accessToken: string): Promise<Candle[]> {
@@ -107,6 +166,11 @@ async function main() {
   console.log(`Scanning Nifty 50 via ${provider}...`)
   const picks: ScreenerPick[] = []
   const entries = Object.entries(nifty50Keys)
+  // Real corporate actions (Upstox only — Groww has no equivalent
+  // endpoint) for every symbol scanned, not just the published top 10, so
+  // a held position outside the top 10 still gets real data instead of
+  // "not available" whenever it honestly can.
+  const corporateActionsBySymbol: Record<string, CorporateAction[]> = {}
 
   for (const [symbol, info] of entries) {
     try {
@@ -133,6 +197,14 @@ async function main() {
         volumeZScore: Math.round(score.volumeZScore * 100) / 100,
         lean: leanFor(score.total),
       })
+
+      if (provider === 'upstox' && info.isin) {
+        try {
+          corporateActionsBySymbol[symbol] = await fetchCorporateActions(info.isin, accessToken)
+        } catch (err) {
+          console.warn(`Corporate actions unavailable for ${symbol}: ${err instanceof Error ? err.message : err}`)
+        }
+      }
     } catch (err) {
       console.warn(`Skipping ${symbol}: ${err instanceof Error ? err.message : err}`)
     }
@@ -141,12 +213,37 @@ async function main() {
   picks.sort((a, b) => b.technicalScore - a.technicalScore)
   const top10 = picks.slice(0, 10)
 
+  // Real per-stock news (Upstox only), batched at up to 30 instrument
+  // keys per call, then re-keyed from instrument key back to symbol.
+  const newsBySymbol: Record<string, NewsArticle[]> = {}
+  if (provider === 'upstox') {
+    const instrumentKeyToSymbol = new Map(
+      entries.filter(([, info]) => info.upstoxInstrumentKey).map(([symbol, info]) => [info.upstoxInstrumentKey!, symbol]),
+    )
+    const allKeys = [...instrumentKeyToSymbol.keys()]
+    const chunkSize = 30
+    for (let i = 0; i < allKeys.length; i += chunkSize) {
+      const chunk = allKeys.slice(i, i + chunkSize)
+      try {
+        const byInstrumentKey = await fetchNewsBatch(chunk, accessToken)
+        for (const [instrumentKey, articles] of Object.entries(byInstrumentKey)) {
+          const symbol = instrumentKeyToSymbol.get(instrumentKey)
+          if (symbol) newsBySymbol[symbol] = articles
+        }
+      } catch (err) {
+        console.warn(`News batch failed: ${err instanceof Error ? err.message : err}`)
+      }
+    }
+  }
+
   const payload = {
     generatedAt: new Date().toISOString(),
     provider,
     universeSize: entries.length,
     scannedCount: picks.length,
     picks: top10,
+    corporateActionsBySymbol,
+    newsBySymbol,
   }
 
   const publishResponse = await fetch(`${PROXY_URL}/internal/screener`, {

@@ -91,9 +91,34 @@ export interface PeerMetric {
   tone: 'positive' | 'neutral' | 'negative'
 }
 
+/** Real corporate action from Upstox's official Corporate Actions API — see scripts/run-screener-scan.ts. */
+export interface CorporateAction {
+  name: string
+  expiryDate: string
+  amount: number | null
+  ratio: string | null
+}
+
+/** Real news article from Upstox's official News API — see scripts/run-screener-scan.ts. */
+export interface NewsArticle {
+  heading: string
+  summary: string
+  articleLink: string
+  publishedAtMs: number
+}
+
 export interface DecisionProfile {
   components: DecisionContribution[]
   checks: DecisionCheck[]
   peerGroup: string
   peerMetrics: PeerMetric[]
+  /**
+   * Real corporate actions/news for this symbol, shown as informational
+   * context — deliberately not folded into `components`' scored "News &
+   * events" category, which stays honestly "not available" there (see
+   * src/engine/liveSignal.ts): turning a headline or a dividend
+   * announcement into a 0-10 point value would be fabricated judgment,
+   * not a genuine measurement. Absent/empty when nothing was fetched.
+   */
+  newsEvents?: { corporateActions: CorporateAction[]; news: NewsArticle[] }
 }

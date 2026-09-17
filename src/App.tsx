@@ -58,7 +58,7 @@ import { costGate } from './engine/costs'
 import { decide, type Decision } from './engine/decide'
 import { evaluateGates, type GateResult } from './engine/gates'
 import { buildLiveDecisionProfile, buildLiveSignal, LIVE_POLICY } from './engine/liveSignal'
-import { computeTechnicalScore } from './engine/technicals'
+import { computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, TECHNICAL_SCORE_MAX, TECHNICAL_WATCH_THRESHOLD } from './engine/technicals'
 import { allocate } from './engine/size'
 import type { DecisionProfile, PaperOrder, Position, SignalAction, StockSignal } from './types'
 
@@ -181,16 +181,18 @@ function SignalBadge({ action }: { action: SignalAction }) {
   )
 }
 
+// Real score is out of TECHNICAL_SCORE_MAX (60, technical-only — see
+// src/engine/liveSignal.ts for why), not the spec's 100-point scale.
 function ScoreRing({ score }: { score: number }) {
-  const tone = score >= 70 ? '#147d64' : score >= 55 ? '#bf7b21' : '#c64f55'
+  const tone = score >= TECHNICAL_BUY_THRESHOLD ? '#147d64' : score >= TECHNICAL_WATCH_THRESHOLD ? '#bf7b21' : '#c64f55'
   return (
     <div
       className="score-ring"
-      style={{ '--score': `${score * 3.6}deg`, '--score-color': tone } as CSSProperties}
-      aria-label={`Model score ${score} out of 100`}
+      style={{ '--score': `${(score / TECHNICAL_SCORE_MAX) * 360}deg`, '--score-color': tone } as CSSProperties}
+      aria-label={`Model score ${score} out of ${TECHNICAL_SCORE_MAX}`}
     >
       <span>{score}</span>
-      <small>/100</small>
+      <small>/{TECHNICAL_SCORE_MAX}</small>
     </div>
   )
 }
@@ -373,10 +375,15 @@ function App() {
       const name = pick?.name ?? nifty50Keys[symbol]?.name ?? symbol
       const signal = buildLiveSignal({ symbol, name, candles, fallback: pick, lastKnownPrice })
       if (signal) signals.set(symbol, signal)
-      profiles.set(symbol, buildLiveDecisionProfile(candles ? computeTechnicalScore(candles) : null))
+      const corporateActions = screener.result?.corporateActionsBySymbol?.[symbol] ?? []
+      const news = screener.result?.newsBySymbol?.[symbol] ?? []
+      profiles.set(
+        symbol,
+        buildLiveDecisionProfile(candles ? computeTechnicalScore(candles) : null, corporateActions, news),
+      )
     }
     return { signalsBySymbol: signals, profilesBySymbol: profiles }
-  }, [trackedSymbols, screenerPickBySymbol, candlesBySymbol, positions, signalNotifications])
+  }, [trackedSymbols, screenerPickBySymbol, candlesBySymbol, positions, signalNotifications, screener.result])
 
   const priceAdjustedSignals = useMemo(
     () => mergeLiveQuotes(Array.from(signalsBySymbol.values()), liveQuotesBySymbol),
@@ -1364,7 +1371,7 @@ function App() {
                 </div>
                 <div className={`decision-result result-${selected.action.toLowerCase()}`}>
                   <span>Final output</span>
-                  <strong><SignalBadge action={selected.action} /> {selected.score}/100</strong>
+                  <strong><SignalBadge action={selected.action} /> {selected.score}/{TECHNICAL_SCORE_MAX}</strong>
                 </div>
               </div>
 
@@ -1388,7 +1395,7 @@ function App() {
                   ))}
                   <div className="score-total">
                     <span>Total evidence score</span>
-                    <strong>{selected.score}<small>/100</small></strong>
+                    <strong>{selected.score}<small>/{TECHNICAL_SCORE_MAX}</small></strong>
                   </div>
                 </div>
 
@@ -1410,10 +1417,10 @@ function App() {
                     <Info size={15} />
                     <p>
                       {selected.action === 'BUY'
-                        ? 'BUY requires ≥70 points and every required entry gate to pass.'
+                        ? `BUY requires ≥${TECHNICAL_BUY_THRESHOLD}/${TECHNICAL_SCORE_MAX} points and every required entry gate to pass.`
                         : selected.action === 'EXIT'
-                          ? 'EXIT requires bearish pressure ≥70 and a recorded long holding. It never opens a short.'
-                          : 'WAIT is returned when the score is below 70 or a required entry gate fails.'}
+                          ? 'EXIT fires only against a recorded long holding, when live price crosses the stop set at buy time — independent of score. It never opens a short.'
+                          : `WAIT is returned when the score is below ${TECHNICAL_BUY_THRESHOLD}/${TECHNICAL_SCORE_MAX}, a required entry gate fails, or (while holding) no exit condition has triggered yet.`}
                     </p>
                   </div>
                 </div>
@@ -1436,6 +1443,52 @@ function App() {
                   <p className="synthetic-label"><TriangleAlert size={13} /> Illustrative peer percentiles—not current company fundamentals.</p>
                 </div>
               </div>
+
+              <article className="panel news-events-panel">
+                <div className="logic-subhead">
+                  <h3>Corporate actions & news</h3>
+                  <span>Real data (Upstox) — informational only, not scored</span>
+                </div>
+                {decisionProfile.newsEvents ? (
+                  <div className="news-events-list">
+                    {decisionProfile.newsEvents.corporateActions.map((action, index) => (
+                      <div className="news-event-row" key={`ca-${index}`}>
+                        <Bell size={14} />
+                        <span>
+                          <strong>{action.name}</strong>
+                          <small>
+                            {action.expiryDate}
+                            {action.ratio ? ` · ${action.ratio}` : ''}
+                            {action.amount ? ` · ₹${action.amount}` : ''}
+                          </small>
+                        </span>
+                        <em>Verified · NSE/Upstox corporate action</em>
+                      </div>
+                    ))}
+                    {decisionProfile.newsEvents.news.map((article, index) => (
+                      <a
+                        className="news-event-row news-event-link"
+                        key={`news-${index}`}
+                        href={article.articleLink}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <Newspaper size={14} />
+                        <span>
+                          <strong>{article.heading}</strong>
+                          <small>{new Date(article.publishedAtMs).toLocaleString('en-IN')}</small>
+                        </span>
+                        <em>Verified · Upstox News API</em>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="score-disclaimer">
+                    Not available for this symbol right now — no recent corporate action or news article from Upstox
+                    (or the scan ran on Groww, which has no equivalent endpoint).
+                  </p>
+                )}
+              </article>
 
               <div className="source-stack-header">
                 <div><h3>Selected closed-beta APIs</h3><p>Use each tester's Upstox OAuth. A public multi-user release requires a separately licensed shared feed.</p></div>
@@ -1685,18 +1738,22 @@ function App() {
             </div>
             <p className="method-intro">Every finalized five-minute candle is scored with information available at that timestamp. A risk gate can turn any score into <strong>WAIT / NO TRADE</strong>.</p>
             <div className="method-steps">
-              <div><span>01</span><p><strong>Trend & momentum</strong>EMA alignment, RSI, opening range and price versus VWAP.</p></div>
-              <div><span>02</span><p><strong>Participation</strong>Volume expansion, liquidity and sector-relative strength.</p></div>
-              <div><span>03</span><p><strong>Context check</strong>Verified announcements and time-stamped news act as context or a veto.</p></div>
-              <div><span>04</span><p><strong>Risk & sizing</strong>Whole-share quantity is limited by capital, stop distance and daily loss budget.</p></div>
+              <div><span>01</span><p><strong>Trend & momentum</strong>EMA alignment, RSI, and price versus VWAP — computed from real candles.</p></div>
+              <div><span>02</span><p><strong>Participation</strong>Real volume expansion versus its own recent baseline.</p></div>
+              <div><span>03</span><p><strong>Context check</strong>Real corporate actions and news (Upstox) shown as context — informational only, not scored or vetoed.</p></div>
+              <div><span>04</span><p><strong>Risk & sizing</strong>Whole-share quantity is limited by capital, a real ATR-based stop, and the daily loss budget.</p></div>
             </div>
             <div className="decision-thresholds">
-              <div className="buy"><span>BUY</span><strong>70–100</strong><small>All required gates pass</small></div>
-              <div className="wait"><span>WAIT</span><strong>45–69</strong><small>Or any entry gate fails</small></div>
-              <div className="avoid"><span>AVOID</span><strong>0–44</strong><small>No actionable edge</small></div>
-              <div className="exit"><span>EXIT</span><strong>≥70 bearish</strong><small>Only against a held long</small></div>
+              <div className="buy"><span>BUY</span><strong>{TECHNICAL_BUY_THRESHOLD}–{TECHNICAL_SCORE_MAX}</strong><small>All required gates pass</small></div>
+              <div className="wait"><span>WAIT</span><strong>{TECHNICAL_WATCH_THRESHOLD}–{TECHNICAL_BUY_THRESHOLD - 1}</strong><small>Or any entry gate fails</small></div>
+              <div className="avoid"><span>AVOID</span><strong>0–{TECHNICAL_WATCH_THRESHOLD - 1}</strong><small>No actionable edge</small></div>
+              <div className="exit"><span>EXIT</span><strong>Stop hit</strong><small>Only against a held long — independent of score</small></div>
             </div>
-            <p className="formula-line">Score = 25% trend + 20% momentum + 15% volume/liquidity + 15% market/sector + 10% news/events + 10% peer fundamentals + 5% risk quality.</p>
+            <p className="formula-line">
+              Score (max {TECHNICAL_SCORE_MAX}, technical-only) = 25% trend/VWAP + 20% momentum + 15% volume/liquidity —
+              market/sector, peer fundamentals and risk quality (the spec's other 40 points) aren't computed; see the
+              Screener tab's disclaimer.
+            </p>
             <div className="opposing-evidence">
               <TriangleAlert size={17} />
               <p><strong>Opposing evidence is required.</strong> For {selected.symbol}: {selected.caution}</p>

@@ -118,4 +118,22 @@ describe('buildLiveDecisionProfile', () => {
     expect(profile.checks[0].passed).toBe(false)
     expect(profile.components.every((c) => c.score === 0)).toBe(true)
   })
+
+  it('attaches real corporate actions/news as informational newsEvents, never as a scored component', () => {
+    const profile = buildLiveDecisionProfile(
+      null,
+      [{ name: 'Dividend', expiryDate: '2026-09-20', amount: 5, ratio: null }],
+      [{ heading: 'Company wins large order', summary: 'Summary', articleLink: 'https://example.com/a', publishedAtMs: 1 }],
+    )
+    expect(profile.newsEvents?.corporateActions).toHaveLength(1)
+    expect(profile.newsEvents?.news).toHaveLength(1)
+    // Still not folded into the scored "News & events" component.
+    const newsComponent = profile.components.find((c) => c.label === 'News & events')
+    expect(newsComponent?.score).toBe(0)
+  })
+
+  it('leaves newsEvents undefined when neither corporate actions nor news exist', () => {
+    const profile = buildLiveDecisionProfile(null, [], [])
+    expect(profile.newsEvents).toBeUndefined()
+  })
 })

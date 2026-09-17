@@ -136,11 +136,12 @@ export function computeATR(candles: Candle[], period = 14): number | null {
 // section 4 gated 70/100 threshold — see src/engine/liveSignal.ts for why.
 export const TECHNICAL_BUY_THRESHOLD = 36
 export const TECHNICAL_WATCH_THRESHOLD = 20
+export const TECHNICAL_SCORE_MAX = 60
 
 export interface TechnicalScore {
   /** Sum of the three components below — out of 60, not 100. See module header. */
   total: number
-  maxTotal: 60
+  maxTotal: typeof TECHNICAL_SCORE_MAX
   trendVwap: number
   momentum: number
   volume: number
@@ -190,7 +191,7 @@ export function computeTechnicalScore(candles: Candle[]): TechnicalScore | null 
 
   return {
     total: trendVwap + momentum + volume,
-    maxTotal: 60,
+    maxTotal: TECHNICAL_SCORE_MAX,
     trendVwap,
     momentum,
     volume,
