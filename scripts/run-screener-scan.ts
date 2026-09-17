@@ -9,9 +9,9 @@
 // cleanly (not an error) when the market is closed or no session token is
 // available today — both are expected, ordinary conditions, not failures.
 
-import { computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, TECHNICAL_WATCH_THRESHOLD } from '../src/engine/technicals'
+import { computeATR, computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, TECHNICAL_WATCH_THRESHOLD } from '../src/engine/technicals'
 import { isNseMarketOpen } from '../src/lib/marketHours'
-import { mapCandleResponse } from '../src/data/upstox/mappers'
+import { mapCandleResponse, mapQuoteResponse } from '../src/data/upstox/mappers'
 import { mapGrowwCandleResponse } from '../src/data/groww/mappers'
 import { formatIstDateTime } from '../src/data/groww/istTime'
 import { nifty50Keys } from '../src/data/nifty50Keys'
@@ -53,6 +53,22 @@ async function fetchUpstoxCandles(instrumentKey: string, accessToken: string): P
   })
   if (!response.ok) throw new Error(`Upstox candles HTTP ${response.status}`)
   return mapCandleResponse(await response.json())
+}
+
+/**
+ * Real day-over-day change % (previous close vs last price), batched.
+ * Candles alone can't give this — they only cover today's session, not
+ * yesterday's close — so this is a separate call, same as the browser's
+ * own useLiveQuotes hook makes, just from the server for every scanned
+ * symbol instead of per-visitor.
+ */
+async function fetchQuotesBatch(instrumentKeys: string[], accessToken: string) {
+  const url = `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKeys.join(','))}`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+  })
+  if (!response.ok) throw new Error(`Upstox quotes HTTP ${response.status}`)
+  return mapQuoteResponse(await response.json())
 }
 
 interface UpstoxCorporateActionsResponse {
@@ -141,15 +157,33 @@ interface ScreenerPick {
   rsi: number
   volumeZScore: number
   lean: 'BUY' | 'WATCH' | 'AVOID'
+  // Full technical breakdown + a real ATR, published so the app's actual
+  // gated decision engine (src/engine/decide.ts, via
+  // src/engine/liveSignal.ts's resolveTechnical/resolveAtr) can evaluate a
+  // real BUY/WAIT/EXIT for any visitor from this scan alone — not only for
+  // someone with their own connected broker session. `atr` is null when
+  // there wasn't enough candle history this run to size one.
+  trendVwap: number
+  momentum: number
+  volume: number
+  emaFast: number
+  emaSlow: number
+  vwap: number
+  atr: number | null
+  /**
+   * Real day-over-day change % (previous close vs last price, from
+   * Upstox's quote endpoint — candles alone don't carry yesterday's
+   * close). Null when the quote batch failed or didn't cover this symbol.
+   */
+  changePercent: number | null
 }
 
 // Thresholds against the 60-point partial (technical-only) score — NOT
 // the spec's real 70/100 gated threshold, which needs the market/sector,
 // news, fundamentals and risk-quality evidence this scan doesn't have.
-// "lean" is deliberately not "BUY/WAIT/EXIT": those are the tested
-// engine's gated verdicts (src/engine/decide.ts) for the six fixture
-// symbols with real entry/stop/target levels and live gate data, none of
-// which exist for an arbitrary universe-wide scan.
+// "lean" is a plain ranking cutoff for this file's own top-10 sort; the
+// app applies the real gated decision engine on top of the fields above,
+// which is a stricter, independent judgment than this label.
 function leanFor(score: number): ScreenerPick['lean'] {
   if (score >= TECHNICAL_BUY_THRESHOLD) return 'BUY'
   if (score >= TECHNICAL_WATCH_THRESHOLD) return 'WATCH'
@@ -166,11 +200,32 @@ async function main() {
   console.log(`Scanning Nifty 50 via ${provider}...`)
   const picks: ScreenerPick[] = []
   const entries = Object.entries(nifty50Keys)
+  const instrumentKeyToSymbol = new Map(
+    entries.filter(([, info]) => info.upstoxInstrumentKey).map(([symbol, info]) => [info.upstoxInstrumentKey!, symbol]),
+  )
   // Real corporate actions (Upstox only — Groww has no equivalent
   // endpoint) for every symbol scanned, not just the published top 10, so
   // a held position outside the top 10 still gets real data instead of
   // "not available" whenever it honestly can.
   const corporateActionsBySymbol: Record<string, CorporateAction[]> = {}
+
+  // Real day-over-day change %, fetched once up front so it's available
+  // while building each pick below, rather than overlaid client-side —
+  // candles alone don't carry yesterday's close.
+  const changePercentBySymbol = new Map<string, number>()
+  if (provider === 'upstox') {
+    try {
+      const quotes = await fetchQuotesBatch([...instrumentKeyToSymbol.keys()], accessToken)
+      for (const [instrumentKey, symbol] of instrumentKeyToSymbol) {
+        const match = quotes.find((quote) => quote.key === instrumentKey || quote.key.includes(instrumentKey))
+        if (match && typeof match.close === 'number' && match.close > 0) {
+          changePercentBySymbol.set(symbol, ((match.lastPrice - match.close) / match.close) * 100)
+        }
+      }
+    } catch (err) {
+      console.warn(`Quotes batch failed (day change % will be unavailable): ${err instanceof Error ? err.message : err}`)
+    }
+  }
 
   for (const [symbol, info] of entries) {
     try {
@@ -186,6 +241,7 @@ async function main() {
 
       const score = computeTechnicalScore(candles)
       if (!score) continue
+      const atr = computeATR(candles, 14)
 
       picks.push({
         symbol,
@@ -196,6 +252,14 @@ async function main() {
         rsi: Math.round(score.rsi * 10) / 10,
         volumeZScore: Math.round(score.volumeZScore * 100) / 100,
         lean: leanFor(score.total),
+        trendVwap: Math.round(score.trendVwap * 10) / 10,
+        momentum: Math.round(score.momentum * 10) / 10,
+        volume: Math.round(score.volume * 10) / 10,
+        emaFast: Math.round(score.emaFast * 100) / 100,
+        emaSlow: Math.round(score.emaSlow * 100) / 100,
+        vwap: Math.round(score.vwap * 100) / 100,
+        atr: atr !== null ? Math.round(atr * 100) / 100 : null,
+        changePercent: changePercentBySymbol.has(symbol) ? Math.round(changePercentBySymbol.get(symbol)! * 100) / 100 : null,
       })
 
       if (provider === 'upstox' && info.isin) {
@@ -217,9 +281,6 @@ async function main() {
   // keys per call, then re-keyed from instrument key back to symbol.
   const newsBySymbol: Record<string, NewsArticle[]> = {}
   if (provider === 'upstox') {
-    const instrumentKeyToSymbol = new Map(
-      entries.filter(([, info]) => info.upstoxInstrumentKey).map(([symbol, info]) => [info.upstoxInstrumentKey!, symbol]),
-    )
     const allKeys = [...instrumentKeyToSymbol.keys()]
     const chunkSize = 30
     for (let i = 0; i < allKeys.length; i += chunkSize) {

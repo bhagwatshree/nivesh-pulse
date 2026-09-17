@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { Candle } from '../../types'
 import type { ScreenerPick } from '../../hooks/useScreener'
-import { buildLiveDecisionProfile, buildLiveSignal, LIVE_SIGNAL_ATR_STOP_MULT, LIVE_SIGNAL_ATR_TARGET_MULT } from '../liveSignal'
+import {
+  buildLiveDecisionProfile,
+  buildLiveSignal,
+  LIVE_SIGNAL_ATR_STOP_MULT,
+  LIVE_SIGNAL_ATR_TARGET_MULT,
+  resolveTechnical,
+  technicalFromScreenerPick,
+} from '../liveSignal'
 import { computeATR, computeTechnicalScore, TECHNICAL_BUY_THRESHOLD } from '../technicals'
 
 const candle = (open: number, high: number, low: number, close: number, volume: number, time = '09:15'): Candle => ({
@@ -58,13 +65,47 @@ describe('buildLiveSignal', () => {
     expect(signal!.action).toBe(technical.total >= TECHNICAL_BUY_THRESHOLD ? 'BUY' : 'WATCH')
   })
 
+  it('gates a real BUY off the screener\'s published technicals alone, with no live candles at all', () => {
+    // A fully-populated ScreenerPick (as scripts/run-screener-scan.ts now
+    // publishes) — no personal broker session required to get a real,
+    // gated BUY signal; the scheduled scan's own numbers are enough.
+    const candles = bullishCandles()
+    const technical = computeTechnicalScore(candles)!
+    const atr = computeATR(candles, 14)!
+    const fullPick: ScreenerPick = {
+      symbol: 'TESTCO',
+      name: 'Test Co Ltd.',
+      lastClose: technical.lastClose,
+      technicalScore: technical.total,
+      technicalScoreMax: technical.maxTotal,
+      rsi: technical.rsi,
+      volumeZScore: technical.volumeZScore,
+      lean: technical.total >= TECHNICAL_BUY_THRESHOLD ? 'BUY' : 'WATCH',
+      trendVwap: technical.trendVwap,
+      momentum: technical.momentum,
+      volume: technical.volume,
+      emaFast: technical.emaFast,
+      emaSlow: technical.emaSlow,
+      vwap: technical.vwap,
+      atr,
+    }
+
+    const signal = buildLiveSignal({ symbol: 'TESTCO', name: 'Test Co Ltd.', candles: null, fallback: fullPick })
+
+    expect(signal).not.toBeNull()
+    expect(signal!.stopLoss).toBeCloseTo(technical.lastClose - LIVE_SIGNAL_ATR_STOP_MULT * atr, 2)
+    expect(signal!.action).toBe(technical.total >= TECHNICAL_BUY_THRESHOLD ? 'BUY' : 'WATCH')
+    expect(signal!.candles).toEqual([]) // no chart data — coarse published numbers only, not raw candles
+  })
+
   it('falls back to the screener\'s published numbers, capped at WATCH, when there are too few live candles', () => {
     const tooFewCandles = [candle(100, 101, 99, 100, 10_000), candle(100, 101, 99, 101, 10_000)]
 
     const signal = buildLiveSignal({ symbol: 'TESTCO', name: 'Test Co Ltd.', candles: tooFewCandles, fallback: fallbackPick })
 
     expect(signal).not.toBeNull()
-    // Never BUY off the fallback path — no live ATR to size a real stop.
+    // fallbackPick has none of the extended fields (trendVwap, atr, etc.) —
+    // the legacy/degraded path this represents can never BUY.
     expect(signal!.action).toBe('WATCH')
     expect(signal!.score).toBe(fallbackPick.technicalScore)
     expect(signal!.price).toBe(fallbackPick.lastClose)
@@ -93,6 +134,27 @@ describe('buildLiveSignal', () => {
     expect(signal!.price).toBe(312.5)
     expect(signal!.action).toBe('WATCH')
     expect(signal!.score).toBe(0)
+  })
+})
+
+describe('technicalFromScreenerPick / resolveTechnical', () => {
+  it('returns null for a pick published before the extended fields existed', () => {
+    expect(technicalFromScreenerPick(fallbackPick)).toBeNull()
+  })
+
+  it('reconstructs a real TechnicalScore from a fully-populated pick', () => {
+    const technical = computeTechnicalScore(bullishCandles())!
+    const fullPick: ScreenerPick = { ...fallbackPick, ...technical, technicalScore: technical.total }
+    const reconstructed = technicalFromScreenerPick(fullPick)
+    expect(reconstructed?.trendVwap).toBe(technical.trendVwap)
+    expect(reconstructed?.rsi).toBe(technical.rsi)
+  })
+
+  it('prefers live candles over a published pick when both are available', () => {
+    const candles = bullishCandles()
+    const liveTechnical = computeTechnicalScore(candles)!
+    const result = resolveTechnical(candles, fallbackPick)
+    expect(result?.lastClose).toBe(liveTechnical.lastClose)
   })
 })
 

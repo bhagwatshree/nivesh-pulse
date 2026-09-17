@@ -11,7 +11,7 @@ import type {
   StockSignal,
 } from '../types'
 import { DEFAULT_POLICY, type RiskPolicy } from './policy'
-import { computeATR, computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, type TechnicalScore } from './technicals'
+import { computeATR, computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, TECHNICAL_SCORE_MAX, type TechnicalScore } from './technicals'
 
 // This module replaces src/data/market.ts's hardcoded fixture signals with
 // numbers derived from real candles (via computeTechnicalScore/computeATR)
@@ -99,10 +99,65 @@ export interface LiveSignalInput {
 }
 
 /**
+ * Turns a screener-published pick's coarser fields back into a
+ * TechnicalScore shape, so a symbol nobody has personally connected a
+ * broker session for can still be gated by the real decision engine off
+ * the scheduled scan's own (already-real) numbers. Returns null for a
+ * pick published before these fields existed (backward compatible with
+ * whatever's still cached in KV) rather than assuming they're present.
+ */
+export function technicalFromScreenerPick(pick: ScreenerPick): TechnicalScore | null {
+  if (
+    pick.trendVwap === undefined ||
+    pick.momentum === undefined ||
+    pick.volume === undefined ||
+    pick.emaFast === undefined ||
+    pick.emaSlow === undefined ||
+    pick.vwap === undefined
+  ) {
+    return null
+  }
+  return {
+    total: pick.technicalScore,
+    maxTotal: TECHNICAL_SCORE_MAX,
+    trendVwap: pick.trendVwap,
+    momentum: pick.momentum,
+    volume: pick.volume,
+    rsi: pick.rsi,
+    emaFast: pick.emaFast,
+    emaSlow: pick.emaSlow,
+    vwap: pick.vwap,
+    volumeZScore: pick.volumeZScore,
+    lastClose: pick.lastClose,
+  }
+}
+
+/**
+ * Real technical evidence for a symbol, live candles first (freshest,
+ * from a personally connected broker session) or the scheduled scan's
+ * last published numbers otherwise (up to ~15 minutes old, but real and
+ * available to every visitor without their own session).
+ */
+export function resolveTechnical(candles: Candle[] | null, fallback?: ScreenerPick): TechnicalScore | null {
+  if (candles) return computeTechnicalScore(candles)
+  if (fallback) return technicalFromScreenerPick(fallback)
+  return null
+}
+
+/** Same live-first-then-published resolution as resolveTechnical, for ATR. */
+export function resolveAtr(candles: Candle[] | null, fallback?: ScreenerPick): number | null {
+  if (candles) return computeATR(candles, 14)
+  if (fallback) return fallback.atr ?? null
+  return null
+}
+
+/**
  * Builds a real StockSignal from live candles when available, the
- * screener's last published numbers next, and a previously-observed last
- * price as a final fallback so a held or pending-notification symbol
- * never simply vanishes. Returns null only when none of the three exist.
+ * screener's last published numbers next (now including a real technical
+ * breakdown and ATR, not just the coarse score — see
+ * technicalFromScreenerPick), and a previously-observed last price as a
+ * final fallback so a held or pending-notification symbol never simply
+ * vanishes. Returns null only when none of the three exist.
  */
 export function buildLiveSignal({
   symbol,
@@ -112,18 +167,24 @@ export function buildLiveSignal({
   fallback,
   lastKnownPrice,
 }: LiveSignalInput): StockSignal | null {
-  const technical = candles ? computeTechnicalScore(candles) : null
+  const technical = resolveTechnical(candles, fallback)
 
-  if (technical && candles) {
-    const atr = computeATR(candles, 14)
+  if (technical) {
+    const isLive = candles !== null
+    const atr = resolveAtr(candles, fallback)
     const price = technical.lastClose
     const hasStop = atr !== null && atr > 0
     const stopLoss = hasStop ? +(price - LIVE_SIGNAL_ATR_STOP_MULT * atr).toFixed(2) : price
     const target = hasStop ? +(price + LIVE_SIGNAL_ATR_TARGET_MULT * atr).toFixed(2) : price
-    // No real ATR yet (too few candles this session) — nothing to size a stop
-    // against, so this can only ever be a WATCH, never a BUY.
+    // No real ATR yet (too few candles this session/scan) — nothing to
+    // size a stop against, so this can only ever be a WATCH, never a BUY.
     const action: SignalAction = hasStop && technical.total >= TECHNICAL_BUY_THRESHOLD ? 'BUY' : 'WATCH'
     const weight = action === 'BUY' ? Math.round((technical.total / technical.maxTotal) * (DEFAULT_POLICY.maxPositionPct * 100)) : 0
+    // Real day-over-day change % when the screener published one (candles
+    // alone don't carry yesterday's close). When live and a personal
+    // broker session is connected, mergeSignals.ts overlays a fresher
+    // live-quote value over this one afterwards.
+    const changePercent = !isLive && fallback?.changePercent != null ? fallback.changePercent : 0
 
     return {
       symbol,
@@ -131,7 +192,7 @@ export function buildLiveSignal({
       sector: sector ?? 'NSE-listed',
       exchange: 'NSE',
       price,
-      changePercent: 0,
+      changePercent,
       action,
       score: round1(technical.total),
       entryLow: price,
@@ -141,17 +202,22 @@ export function buildLiveSignal({
       weight,
       horizon: 'Intraday · 5-min bars',
       riskReward: hasStop ? riskRewardLabel(price, target, stopLoss) : '—',
-      updatedAt: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      updatedAt: isLive
+        ? new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : 'Last scheduled scan',
       thesis: buildThesis(technical),
       caution: hasStop
         ? `Invalidated on a 5-minute close below ₹${stopLoss.toFixed(2)}.`
-        : 'Not enough candles yet this session to size a real stop.',
+        : 'Not enough candle history yet to size a real stop.',
       catalyst: 'Technical scan only — no live news or fundamentals feed.',
       factors: buildFactors(technical),
-      candles,
+      candles: candles ?? [],
     }
   }
 
+  // Backward-compat only: a pick published before technicalFromScreenerPick's
+  // fields existed. Once every visitor has fetched a payload from the
+  // updated scan, this branch is effectively dead code.
   if (fallback) {
     const price = fallback.lastClose
     return {
@@ -160,7 +226,7 @@ export function buildLiveSignal({
       sector: sector ?? 'NSE-listed',
       exchange: 'NSE',
       price,
-      changePercent: 0,
+      changePercent: fallback.changePercent ?? 0,
       // Always WATCH: without this symbol's own live candles there's no
       // real ATR to size a stop against, so it can't be gated to BUY here —
       // select it to fetch live candles and get a real decision.
@@ -231,7 +297,7 @@ function unavailableComponent(
 const NO_LIVE_FEED_CHECK: DecisionCheck = {
   label: 'Live feed',
   passed: false,
-  detail: 'No live candles for this symbol yet — connect a broker session to see the full gate breakdown.',
+  detail: 'No technical data for this symbol yet from a live session or the scheduled scan.',
 }
 
 const UNAVAILABLE_PEER_GROUP = 'Not available — no live fundamentals/peer feed yet.'
@@ -258,7 +324,7 @@ export function buildLiveDecisionProfile(
         label: 'Trend & VWAP',
         score: round1(technical.trendVwap),
         maxScore: 25,
-        detail: 'EMA9-vs-EMA21 and price-vs-VWAP separation, computed from live candles.',
+        detail: 'EMA9-vs-EMA21 and price-vs-VWAP separation, computed from real candles.',
         source: 'market',
       },
       {

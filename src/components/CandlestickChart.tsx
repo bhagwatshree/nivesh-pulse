@@ -157,10 +157,21 @@ export default function CandlestickChart({ candles, symbol, positive }: Candlest
         )}
       </svg>
 
-      <div className="chart-key" aria-hidden="true">
-        <span><i className="key-line key-ema" /> EMA 5</span>
-        <span><i className="key-line key-vwap" /> VWAP</span>
-        <span className="demo-chart-label">Illustrative replay</span>
+      <div className="chart-key">
+        <span className="term-tooltip" tabIndex={0}>
+          <i className="key-line key-ema" aria-hidden="true" /> EMA 5
+          <span className="term-tooltip-bubble" role="tooltip">
+            A 5-period EMA plotted on this chart for a fast, reactive trend line — illustrative only; the scoring
+            model itself compares EMA9 vs EMA21, not this line.
+          </span>
+        </span>
+        <span className="term-tooltip" tabIndex={0}>
+          <i className="key-line key-vwap" aria-hidden="true" /> VWAP
+          <span className="term-tooltip-bubble" role="tooltip">
+            Volume-Weighted Average Price — today's average traded price, weighted by volume.
+          </span>
+        </span>
+        <span className="demo-chart-label" aria-hidden="true">Illustrative replay</span>
       </div>
     </div>
   )

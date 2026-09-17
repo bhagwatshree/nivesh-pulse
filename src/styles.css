@@ -663,6 +663,38 @@ h3 {
 .crosshair circle { fill: #fff; stroke: #3a53c4; stroke-width: 2; }
 .chart-key { display: flex; align-items: center; gap: 14px; padding: 0 3px; color: #89939f; font-size: 8px; }
 .chart-key span { display: inline-flex; align-items: center; gap: 5px; }
+
+.term-tooltip { position: relative; border-bottom: 1px dotted #9ba3ac; cursor: help; }
+.term-tooltip-bubble {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 220px;
+  padding: 8px 10px;
+  color: #eef1ee;
+  border-radius: 7px;
+  background: #2b3540;
+  box-shadow: 0 6px 18px rgba(20, 30, 40, 0.28);
+  font-size: 7.2px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  z-index: 20;
+}
+.term-tooltip-bubble::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #2b3540;
+}
+.term-tooltip:hover .term-tooltip-bubble,
+.term-tooltip:focus-visible .term-tooltip-bubble { display: block; }
 .key-line { display: inline-block; width: 15px; height: 2px; border-radius: 2px; }
 .key-ema { background: #546ccf; }
 .key-vwap { height: 1px; border-top: 1px dashed #d1993e; }

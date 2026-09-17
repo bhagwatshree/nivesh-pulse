@@ -57,8 +57,8 @@ import { canPlaceOrder } from './engine/orders'
 import { costGate } from './engine/costs'
 import { decide, type Decision } from './engine/decide'
 import { evaluateGates, type GateResult } from './engine/gates'
-import { buildLiveDecisionProfile, buildLiveSignal, LIVE_POLICY } from './engine/liveSignal'
-import { computeTechnicalScore, TECHNICAL_BUY_THRESHOLD, TECHNICAL_SCORE_MAX, TECHNICAL_WATCH_THRESHOLD } from './engine/technicals'
+import { buildLiveDecisionProfile, buildLiveSignal, LIVE_POLICY, resolveTechnical } from './engine/liveSignal'
+import { TECHNICAL_BUY_THRESHOLD, TECHNICAL_SCORE_MAX, TECHNICAL_WATCH_THRESHOLD } from './engine/technicals'
 import { allocate } from './engine/size'
 import type { DecisionProfile, PaperOrder, Position, SignalAction, StockSignal } from './types'
 
@@ -194,6 +194,53 @@ function ScoreRing({ score }: { score: number }) {
       <span>{score}</span>
       <small>/{TECHNICAL_SCORE_MAX}</small>
     </div>
+  )
+}
+
+// Plain-language definitions for the jargon/abbreviations and (for the
+// four uncomputed evidence categories) *why* they're marked unavailable
+// rather than just labeling them "not available" with no explanation.
+// Matched by exact label first, then by substring so a label like
+// "RSI (14)" or "RSI not overbought" still finds the "RSI" entry.
+const GLOSSARY: Record<string, string> = {
+  'Trend & VWAP': 'Combines EMA9-vs-EMA21 trend direction with price-vs-VWAP separation — computed from real candles, the largest single scored category (max 25).',
+  Momentum: 'Rewards RSI(14) sitting in a constructive-but-not-overbought band (roughly 50–80), peaking near 65 (max 20).',
+  'Volume & liquidity': 'Today’s volume compared to its own recent baseline, as a standard-deviation z-score, capped at 2σ (max 15).',
+  'Market & sector': 'How the stock is doing relative to its sector/index. Not scored — no live sector-relative-strength feed is integrated yet.',
+  'News & events': 'Verified announcements/news as a supporting or vetoing signal. Not scored numerically — see the real Corporate actions & news panel below instead; turning a headline into a point value would be a fabricated judgment, not a measurement.',
+  'Peer fundamentals': 'Profitability/balance-sheet standing versus industry peers. Not scored — no live fundamentals feed is integrated yet.',
+  'Risk quality': 'Whether stop distance and position size fit the risk budget. Not scored here — risk sizing is enforced directly by the allocation engine instead of a separate point value.',
+  'Trend confirmed': 'Passes when the 9-period EMA is above the 21-period EMA — a short-term uptrend.',
+  'VWAP reclaimed': 'Passes when price is at or above the session’s Volume-Weighted Average Price.',
+  'RSI not overbought': 'Passes when RSI(14) is below 80, guarding against buying into an already-extended move.',
+  'Volume confirmation': 'Passes when volume is above its own recent baseline (a positive z-score).',
+  RSI: 'Relative Strength Index (14-period) — momentum on a 0–100 scale. Below ~30 is often called oversold, above ~70 overbought.',
+  VWAP: 'Volume-Weighted Average Price — today’s average traded price, weighted by volume. A common intraday fair-value reference line.',
+  'EMA 9/21': 'Exponential Moving Averages over 9 and 21 candles — EMA9 above EMA21 is read as a short-term uptrend.',
+  'EMA 5': 'A 5-period EMA plotted on this chart for a fast, reactive trend line — illustrative only; the scoring model itself compares EMA9 vs EMA21, not this line.',
+  'Volume z-score': 'How many standard deviations today’s volume is above (positive) or below (negative) its own recent baseline.',
+  Volume: 'How many standard deviations today’s volume is above (positive) or below (negative) its own recent baseline.',
+}
+
+function lookupGlossary(label: string): string | undefined {
+  if (GLOSSARY[label]) return GLOSSARY[label]
+  const key = Object.keys(GLOSSARY)
+    .sort((a, b) => b.length - a.length)
+    .find((candidate) => label.includes(candidate))
+  return key ? GLOSSARY[key] : undefined
+}
+
+/** Wraps a label with a hover/focus tooltip when a glossary definition exists for it; otherwise renders it plain. */
+function Glossary({ label }: { label: string }) {
+  const definition = lookupGlossary(label)
+  if (!definition) return <>{label}</>
+  return (
+    <span className="term-tooltip" tabIndex={0}>
+      {label}
+      <span className="term-tooltip-bubble" role="tooltip">
+        {definition}
+      </span>
+    </span>
   )
 }
 
@@ -377,10 +424,7 @@ function App() {
       if (signal) signals.set(symbol, signal)
       const corporateActions = screener.result?.corporateActionsBySymbol?.[symbol] ?? []
       const news = screener.result?.newsBySymbol?.[symbol] ?? []
-      profiles.set(
-        symbol,
-        buildLiveDecisionProfile(candles ? computeTechnicalScore(candles) : null, corporateActions, news),
-      )
+      profiles.set(symbol, buildLiveDecisionProfile(resolveTechnical(candles, pick), corporateActions, news))
     }
     return { signalsBySymbol: signals, profilesBySymbol: profiles }
   }, [trackedSymbols, screenerPickBySymbol, candlesBySymbol, positions, signalNotifications, screener.result])
@@ -522,11 +566,11 @@ function App() {
   const allocations = allocationPlan.allocations
   const selected = signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0] ?? EMPTY_SIGNAL_PLACEHOLDER
   const selectedDecision = decisions.get(selected.symbol)
-  // selectedDecisionProfile is only genuinely computed for `selectedSymbol`
-  // itself (the one with live candles fetched) — anything else (including
-  // the `signals[0]` fallback above, when `selectedSymbol` isn't in the
-  // current list) gets the honest "not available" profile instead of a
-  // mismatched one.
+  // Every tracked symbol gets a real profilesBySymbol entry (live candles
+  // when connected, the scheduled scan's published technicals otherwise);
+  // fallbackDecisionProfile only covers the edge case where `selected`
+  // itself came from the `signals[0]` fallback above (selectedSymbol not
+  // in the current tracked set at all).
   const decisionProfile = profilesBySymbol.get(selected.symbol) ?? fallbackDecisionProfile
   const selectedAllocation = allocations.find((item) => item.signal.symbol === selected.symbol)
   const invested = allocationPlan.invested
@@ -1327,7 +1371,7 @@ function App() {
               <div className="factor-grid">
                 {selected.factors.map((factor) => (
                   <div className="factor" key={factor.label}>
-                    <span>{factor.label}</span>
+                    <span><Glossary label={factor.label} /></span>
                     <strong className={`factor-${factor.tone}`}>{factor.value}</strong>
                     <i className={factor.tone}><b /></i>
                   </div>
@@ -1384,7 +1428,7 @@ function App() {
                   {decisionProfile.components.map((component) => (
                     <div className="score-row" key={component.label}>
                       <div className="score-copy">
-                        <span><strong>{component.label}</strong><em className={`source-key source-${component.source}`}>{component.source}</em></span>
+                        <span><strong><Glossary label={component.label} /></strong><em className={`source-key source-${component.source}`}>{component.source}</em></span>
                         <p>{component.detail}</p>
                       </div>
                       <div className="score-track" aria-hidden="true">
@@ -1408,7 +1452,7 @@ function App() {
                     {decisionProfile.checks.map((check) => (
                       <div className={check.passed ? 'gate-row passed' : 'gate-row blocked'} key={check.label}>
                         <span className="gate-icon">{check.passed ? <Check size={14} /> : <X size={14} />}</span>
-                        <span><strong>{check.label}</strong><small>{check.detail}</small></span>
+                        <span><strong><Glossary label={check.label} /></strong><small>{check.detail}</small></span>
                         <em>{check.passed ? 'PASS' : 'BLOCK'}</em>
                       </div>
                     ))}

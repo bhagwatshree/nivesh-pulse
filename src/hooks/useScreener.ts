@@ -14,6 +14,19 @@ export interface ScreenerPick {
   rsi: number
   volumeZScore: number
   lean: 'BUY' | 'WATCH' | 'AVOID'
+  // Full technical breakdown + a real ATR — see resolveTechnical/resolveAtr
+  // in src/engine/liveSignal.ts. Optional because a payload published
+  // before this field existed won't have it; those callers fall back
+  // gracefully rather than assuming it's present.
+  trendVwap?: number
+  momentum?: number
+  volume?: number
+  emaFast?: number
+  emaSlow?: number
+  vwap?: number
+  atr?: number | null
+  /** Real day-over-day change % (previous close vs last price) — null if the scan's quote batch failed or missed this symbol. */
+  changePercent?: number | null
 }
 
 export interface ScreenerResult {
