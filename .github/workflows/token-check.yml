@@ -1,0 +1,27 @@
+name: Morning login check
+
+# 09:25 IST = 03:55 UTC; offset to :57 (see screener-scan.yml on why
+# round-minute crons get dropped).
+on:
+  schedule:
+    - cron: '57 3 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run token:check
+        env:
+          SCAN_SHARED_SECRET: ${{ secrets.SCAN_SHARED_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
