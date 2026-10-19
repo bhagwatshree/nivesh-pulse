@@ -19,7 +19,7 @@ import type { Candle, CorporateAction, NewsArticle } from '../src/types'
 import {
   DEFAULT_PAPER_POLICY,
   assessMacro,
-  breadthStandAside,
+  standAsideReason,
   buildCandidate,
   istDate,
   istHHMM,
@@ -294,8 +294,7 @@ async function runPaperTrader(
     else if (reason?.startsWith('negative news') || reason?.startsWith('weak fundamentals')) skipped.push(`${symbol}: ${reason}`)
   }
 
-  const breadth = breadthStandAside([...changePercentBySymbol.values()])
-  const standAside = state.macro.level === 'ELEVATED' ? 'Elevated geopolitical/macro risk in headlines' : breadth
+  const standAside = standAsideReason(state.macro, [...changePercentBySymbol.values()])
 
   const notes: string[] = [...skipped]
   if (standAside) notes.push(`Standing aside on new entries: ${standAside}`)

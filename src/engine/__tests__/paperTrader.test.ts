@@ -4,6 +4,7 @@ import {
   DEFAULT_PAPER_POLICY,
   assessMacro,
   breadthStandAside,
+  standAsideReason,
   netPnl,
   newBook,
   planEntry,
@@ -140,5 +141,17 @@ describe('ratioVeto', () => {
     expect(ratioVeto(r('50', '12'))).toMatch(/over 3x/)
     expect(ratioVeto(r('20', '12'))).toBeNull()
     expect(ratioVeto(undefined)).toBeNull()
+  })
+})
+
+describe('standAsideReason', () => {
+  const elevated = { level: 'ELEVATED' as const, riskOffHeadlines: ['war'], scanned: 100 }
+  it('does not block on scary headlines alone', () => {
+    expect(standAsideReason(elevated, Array(20).fill(0.1))).toBeNull()
+  })
+  it('blocks on scary headlines plus a weak market, and on deep weakness regardless', () => {
+    expect(standAsideReason(elevated, Array(20).fill(-0.5))).not.toBeNull()
+    expect(standAsideReason(null, Array(20).fill(-0.5))).toBeNull()
+    expect(standAsideReason(null, Array(20).fill(-1.2))).not.toBeNull()
   })
 })

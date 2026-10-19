@@ -447,12 +447,34 @@ export function assessMacro(headlines: string[], threshold = 4): MacroAssessment
   }
 }
 
-/** Breadth gate: stand aside when the Nifty 50 median day-change is at or below -1%. */
-export function breadthStandAside(changePercents: number[]): string | null {
+/** Median day-change % across the Nifty 50, or null with too little data. */
+export function medianChange(changePercents: number[]): number | null {
   const values = changePercents.filter((v) => Number.isFinite(v)).sort((a, b) => a - b)
   if (values.length < 10) return null
-  const median = values[Math.floor(values.length / 2)]
-  return median <= -1 ? `Market-wide weakness (median Nifty 50 change ${median.toFixed(2)}%)` : null
+  return values[Math.floor(values.length / 2)]
+}
+
+/** Breadth gate: stand aside when the Nifty 50 median day-change is at or below -1%. */
+export function breadthStandAside(changePercents: number[]): string | null {
+  const median = medianChange(changePercents)
+  return median !== null && median <= -1 ? `Market-wide weakness (median Nifty 50 change ${median.toFixed(2)}%)` : null
+}
+
+/**
+ * Combined stand-aside decision. Risk-off headlines alone do NOT block
+ * trading: a war or oil spike can dominate the news for months while
+ * markets trade normally, and a headline-only gate would then block every
+ * day. Headlines only tighten the breadth bar (-1% -> -0.3%), so a
+ * scary-news day still needs the market itself to be weak.
+ */
+export function standAsideReason(macro: MacroAssessment | null, changePercents: number[]): string | null {
+  const hard = breadthStandAside(changePercents)
+  if (hard) return hard
+  const median = medianChange(changePercents)
+  if (macro?.level === 'ELEVATED' && median !== null && median <= -0.3) {
+    return `Risk-off headlines and a weak market (median Nifty 50 change ${median.toFixed(2)}%)`
+  }
+  return null
 }
 
 // --------------------------------------------------------------- summary
