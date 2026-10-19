@@ -43,4 +43,5 @@ jobs:
       - run: npm run screener:scan
         env:
           SCAN_SHARED_SECRET: ${{ secrets.SCAN_SHARED_SECRET }}
+          NET_TARGET_PCT: ${{ vars.NET_TARGET_PCT }}
           FORCE_SCREENER_RUN: ${{ github.event.inputs.force == 'true' && '1' || '' }}

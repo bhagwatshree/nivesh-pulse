@@ -159,6 +159,42 @@ async function handleInternalPublishScreener(request: Request, env: Env, cors: H
   return json({ status: 'ok' }, 200, cors)
 }
 
+// Paper-trading ledger: today's state and the multi-month day history,
+// stored as opaque JSON. Only the two named keys are allowed.
+const PAPER_KEYS = new Set(['state', 'history'])
+
+async function handleInternalPaper(request: Request, url: URL, env: Env, cors: HeadersInit): Promise<Response> {
+  if (!isAuthorizedForInternal(request, env)) return json({ error: 'unauthorized' }, 401, cors)
+  const name = url.pathname.slice('/internal/paper/'.length)
+  if (!PAPER_KEYS.has(name)) return json({ error: 'unknown_key' }, 404, cors)
+  const key = 'paper:' + name
+  if (request.method === 'GET') {
+    const raw = await env.NIVESH_KV.get(key)
+    return new Response(raw ?? 'null', { status: 200, headers: { 'Content-Type': 'application/json', ...cors } })
+  }
+  if (request.method === 'POST') {
+    const text = await request.text()
+    try {
+      JSON.parse(text)
+    } catch {
+      return json({ error: 'invalid_json' }, 400, cors)
+    }
+    await env.NIVESH_KV.put(key, text)
+    return json({ status: 'ok' }, 200, cors)
+  }
+  return json({ error: 'method_not_allowed' }, 405, cors)
+}
+
+// Public, read-only view of the mock-trading ledger for the app's Track
+// record screen. Paper trades only - no tokens or account data in it.
+async function handlePaperReport(env: Env, cors: HeadersInit): Promise<Response> {
+  const [state, history] = await Promise.all([env.NIVESH_KV.get('paper:state'), env.NIVESH_KV.get('paper:history')])
+  return new Response('{"state":' + (state ?? 'null') + ',"history":' + (history ?? '[]') + '}', {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', ...cors },
+  })
+}
+
 async function handleScreenerLatest(env: Env, cors: HeadersInit): Promise<Response> {
   const raw = await env.NIVESH_KV.get('screener:latest')
   if (!raw) return json({ generatedAt: null, picks: [] }, 200, cors)
@@ -283,6 +319,12 @@ export default {
     }
     if (url.pathname === '/internal/screener' && request.method === 'POST') {
       return handleInternalPublishScreener(request, env, cors)
+    }
+    if (url.pathname.startsWith('/internal/paper/')) {
+      return handleInternalPaper(request, url, env, cors)
+    }
+    if (url.pathname === '/paper/report' && request.method === 'GET') {
+      return handlePaperReport(env, cors)
     }
     if (url.pathname === '/screener/latest' && request.method === 'GET') {
       return handleScreenerLatest(env, cors)

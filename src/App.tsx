@@ -50,6 +50,8 @@ import { useLiveCandlesForSymbols } from './hooks/useLiveCandlesForSymbols'
 import { useLiveIndices } from './hooks/useLiveIndices'
 import { useLiveQuotes } from './hooks/useLiveQuotes'
 import { useScreener, type ScreenerPick } from './hooks/useScreener'
+import { usePaperReport } from './hooks/usePaperReport'
+import PaperTrackRecord from './components/PaperTrackRecord'
 import { useUpstoxSession } from './hooks/useUpstoxSession'
 import { inr } from './lib/allocation'
 import { computeSignalPnl, RESOLUTION_WINDOW_MS, type SignalNotification } from './lib/signalOutcome'
@@ -62,12 +64,13 @@ import { TECHNICAL_BUY_THRESHOLD, TECHNICAL_SCORE_MAX, TECHNICAL_WATCH_THRESHOLD
 import { allocate } from './engine/size'
 import type { DecisionProfile, PaperOrder, Position, SignalAction, StockSignal } from './types'
 
-type NavId = 'overview' | 'signals' | 'screener' | 'plan' | 'insights' | 'history'
+type NavId = 'overview' | 'signals' | 'screener' | 'track' | 'plan' | 'insights' | 'history'
 
 const navItems: { id: NavId; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Today', icon: LayoutDashboard },
   { id: 'signals', label: 'Signals', icon: CandlestickIcon },
   { id: 'screener', label: 'Screener', icon: ScanSearch },
+  { id: 'track', label: 'Track record', icon: Gauge },
   { id: 'plan', label: 'Allocation', icon: WalletCards },
   { id: 'insights', label: 'Research', icon: Newspaper },
   { id: 'history', label: 'Journal', icon: History },
@@ -285,6 +288,7 @@ function App() {
   const upstoxSession = useUpstoxSession()
   const growwSession = useGrowwSession()
   const screener = useScreener()
+  const paperReport = usePaperReport()
 
   // Auto-select the scheduled scan's top real pick once one arrives,
   // rather than defaulting to a hardcoded symbol. Only runs while nothing
@@ -1216,6 +1220,8 @@ function App() {
               )}
             </article>
           </section>
+
+          <PaperTrackRecord report={paperReport.report} error={paperReport.error} />
 
           <section id="plan" className="anchor-section section-block">
             <div className="section-heading">

@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
-    "screener:scan": "tsx scripts/run-screener-scan.ts"
+    "screener:scan": "tsx scripts/run-screener-scan.ts",
+    "report:daily": "tsx scripts/send-daily-report.ts"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.2.8",

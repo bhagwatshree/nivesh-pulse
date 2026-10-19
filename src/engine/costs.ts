@@ -20,6 +20,12 @@ export const RATES_AS_OF = 'unverified-placeholder'
 export interface CostRates {
   /** Flat brokerage per executed order (charged on both the buy and the sell leg). */
   brokeragePerOrder: number
+  /**
+   * Optional per-leg cap as a fraction of that leg's traded value — the
+   * "flat Rs20 or 0.1%, whichever is lower" plan most discount brokers
+   * use for intraday equity. Omit for a purely flat fee.
+   */
+  brokerageCapPct?: number
   /** Securities Transaction Tax — intraday equity: sell leg only. */
   sttSellPct: number
   /** Exchange transaction charges — both legs. */
@@ -38,7 +44,7 @@ export const DEFAULT_COST_RATES: CostRates = {
   brokeragePerOrder: 20,
   sttSellPct: 0.00025,
   exchangeTxnPct: 0.0000297,
-  sebiFeesPct: 0.0000001,
+  sebiFeesPct: 0.000001, // Rs10 per crore
   gstPct: 0.18,
   stampDutyBuyPct: 0.00003,
   slippageBps: 5,
@@ -78,7 +84,11 @@ export function roundTripCosts(
   const buyValue = entryPrice * quantity
   const sellValue = exitPrice * quantity
 
-  const brokerage = rates.brokeragePerOrder * 2
+  const legBrokerage = (value: number) =>
+    rates.brokerageCapPct === undefined
+      ? rates.brokeragePerOrder
+      : Math.min(rates.brokeragePerOrder, value * rates.brokerageCapPct)
+  const brokerage = legBrokerage(buyValue) + legBrokerage(sellValue)
   const stt = sellValue * rates.sttSellPct
   const exchangeTxn = (buyValue + sellValue) * rates.exchangeTxnPct
   const sebiFees = (buyValue + sellValue) * rates.sebiFeesPct
@@ -135,4 +145,17 @@ export function costGate(
       ? `Modeled edge Rs${grossEdge.toFixed(2)} clears round-trip costs of Rs${costs.total.toFixed(2)}.`
       : `Modeled edge Rs${grossEdge.toFixed(2)} does not clear round-trip costs of Rs${costs.total.toFixed(2)}.`,
   }
+}
+
+/**
+ * Rates used by the paper trader: Rs20-or-0.1% brokerage per leg, and a
+ * 3 bps/leg slippage allowance (Nifty 50 names are liquid; fills are also
+ * taken at the NEXT bar's open, which already carries real gap risk).
+ * Still not a verified tariff for any specific broker account — confirm
+ * against your own contract note before trusting the reported net figure.
+ */
+export const PAPER_COST_RATES: CostRates = {
+  ...DEFAULT_COST_RATES,
+  brokerageCapPct: 0.001,
+  slippageBps: 3,
 }

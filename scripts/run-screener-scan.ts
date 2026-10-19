@@ -16,6 +16,23 @@ import { mapGrowwCandleResponse } from '../src/data/groww/mappers'
 import { formatIstDateTime } from '../src/data/groww/istTime'
 import { nifty50Keys } from '../src/data/nifty50Keys'
 import type { Candle, CorporateAction, NewsArticle } from '../src/types'
+import {
+  DEFAULT_PAPER_POLICY,
+  assessMacro,
+  breadthStandAside,
+  buildCandidate,
+  istDate,
+  istHHMM,
+  newDayState,
+  newBook,
+  tickBook,
+  type Candidate,
+  type PaperDayState,
+  type PaperPolicy,
+} from '../src/engine/paperTrader'
+import type { KeyRatio } from '../src/engine/paperTrader'
+import { fetchMacroHeadlines } from './lib/macroNews'
+import { loadPaper, savePaper, type DayRecord } from './lib/paperStore'
 
 const PROXY_URL = process.env.PROXY_URL ?? 'https://nivesh-pulse-upstox-proxy.bhagwatshree.workers.dev'
 const SCAN_SHARED_SECRET = process.env.SCAN_SHARED_SECRET
@@ -93,6 +110,19 @@ async function fetchCorporateActions(isin: string, accessToken: string): Promise
     amount: event.amount,
     ratio: event.ratio,
   }))
+}
+
+interface UpstoxKeyRatiosResponse {
+  data?: { name: string; company_value: string; sector_value: string }[]
+}
+
+/** Upstox Key Ratios API: P/E, P/B, ROA, ROE, ROCE, EV/EBITDA vs sector. */
+async function fetchKeyRatios(isin: string, accessToken: string): Promise<KeyRatio[]> {
+  const url = `https://api.upstox.com/v2/fundamentals/${encodeURIComponent(isin)}/key-ratios`
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } })
+  if (!response.ok) throw new Error(`Upstox key-ratios HTTP ${response.status}`)
+  const body = (await response.json()) as UpstoxKeyRatiosResponse
+  return (body.data ?? []).map((r) => ({ name: r.name, companyValue: r.company_value, sectorValue: r.sector_value }))
 }
 
 interface UpstoxNewsResponse {
@@ -190,6 +220,101 @@ function leanFor(score: number): ScreenerPick['lean'] {
   return 'AVOID'
 }
 
+const PAPER_CAPITALS = (process.env.PAPER_CAPITALS ?? '10000,20000,50000')
+  .split(',')
+  .map(Number)
+  .filter((n) => n > 0)
+
+const paperPolicy: PaperPolicy = {
+  ...DEFAULT_PAPER_POLICY,
+  netTargetPct: process.env.NET_TARGET_PCT ? Number(process.env.NET_TARGET_PCT) / 100 : DEFAULT_PAPER_POLICY.netTargetPct,
+}
+
+async function runPaperTrader(
+  candlesBySymbol: Record<string, Candle[]>,
+  newsBySymbol: Record<string, NewsArticle[]>,
+  changePercentBySymbol: Map<string, number>,
+  entries: [string, { name: string; isin?: string | null }][],
+  provider: string,
+  accessToken: string,
+) {
+  const secret = SCAN_SHARED_SECRET!
+  const now = new Date()
+  const today = istDate(now)
+  const nowHHMM = istHHMM(now)
+
+  let state = await loadPaper<PaperDayState>('state', secret)
+  if (state && state.date !== today) {
+    // The previous day was never reported (report job missed). Archive it
+    // so history is not lost; open positions there are marked NO_DATA by
+    // the report script's fallback, so here we only keep what exists.
+    const history = (await loadPaper<DayRecord[]>('history', secret)) ?? []
+    if (!history.some((d) => d.date === state!.date)) {
+      history.push({
+        date: state.date, ticks: state.ticks, firstTickAt: state.firstTickAt, lastTickAt: state.lastTickAt,
+        macroLevel: state.macro?.level ?? null, summaries: [], books: state.books, reported: false,
+      })
+      await savePaper('history', history, secret)
+    }
+    state = null
+  }
+  if (!state) state = newDayState(today, PAPER_CAPITALS)
+  for (const capital of PAPER_CAPITALS) {
+    if (!state.books[String(capital)]) state.books[String(capital)] = newBook(capital)
+  }
+
+  if (!state.macro || state.ticks % 12 === 0) {
+    const headlines = await fetchMacroHeadlines(now.getTime())
+    state.macro = assessMacro(headlines)
+  }
+
+  // Key ratios barely move intraday: fetch once per day (first scan),
+  // reuse for every later tick.
+  if (!state.ratios) {
+    state.ratios = {}
+    if (provider === 'upstox') {
+      for (const [symbol, info] of entries) {
+        if (!info.isin) continue
+        try {
+          state.ratios[symbol] = await fetchKeyRatios(info.isin, accessToken)
+        } catch (err) {
+          console.warn(`Key ratios unavailable for ${symbol}: ${err instanceof Error ? err.message : err}`)
+        }
+      }
+    }
+  }
+
+  const candidates: Candidate[] = []
+  const skipped: string[] = []
+  for (const [symbol, info] of entries) {
+    const candles = candlesBySymbol[symbol]
+    if (!candles) continue
+    const { candidate, reason } = buildCandidate(symbol, info.name, candles, nowHHMM, newsBySymbol[symbol], now.getTime(), state.ratios[symbol])
+    if (candidate) candidates.push(candidate)
+    else if (reason?.startsWith('negative news') || reason?.startsWith('weak fundamentals')) skipped.push(`${symbol}: ${reason}`)
+  }
+
+  const breadth = breadthStandAside([...changePercentBySymbol.values()])
+  const standAside = state.macro.level === 'ELEVATED' ? 'Elevated geopolitical/macro risk in headlines' : breadth
+
+  const notes: string[] = [...skipped]
+  if (standAside) notes.push(`Standing aside on new entries: ${standAside}`)
+  for (const book of Object.values(state.books)) {
+    tickBook(book, { nowHHMM, nowMs: now.getTime(), candlesBySymbol, candidates, standAside }, paperPolicy, notes)
+  }
+
+  state.netTargetPct = paperPolicy.netTargetPct
+  state.ticks += 1
+  state.firstTickAt ??= now.toISOString()
+  state.lastTickAt = now.toISOString()
+  // Keep each distinct note once, newest first, bounded.
+  state.notes = [...new Set([...notes, ...state.notes])].slice(0, 60)
+  await savePaper('state', state, secret)
+  const open = Object.values(state.books).reduce((n, b) => n + b.open.length, 0)
+  const closed = Object.values(state.books).reduce((n, b) => n + b.closed.length, 0)
+  console.log(`Paper trader: ${candidates.length} candidates, ${open} open, ${closed} closed across ${PAPER_CAPITALS.length} books.`)
+}
+
 async function main() {
   const { provider, accessToken } = await getToken()
   if (!provider || !accessToken) {
@@ -199,6 +324,7 @@ async function main() {
 
   console.log(`Scanning Nifty 50 via ${provider}...`)
   const picks: ScreenerPick[] = []
+  const candlesBySymbol: Record<string, Candle[]> = {}
   const entries = Object.entries(nifty50Keys)
   const instrumentKeyToSymbol = new Map(
     entries.filter(([, info]) => info.upstoxInstrumentKey).map(([symbol, info]) => [info.upstoxInstrumentKey!, symbol]),
@@ -242,6 +368,7 @@ async function main() {
         candles = await fetchGrowwCandlesDirect(growwSymbol, accessToken)
       }
       if (!candles) continue
+      candlesBySymbol[symbol] = candles
 
       const score = computeTechnicalScore(candles)
       if (!score) continue
@@ -299,6 +426,13 @@ async function main() {
         console.warn(`News batch failed: ${err instanceof Error ? err.message : err}`)
       }
     }
+  }
+
+  try {
+    await runPaperTrader(candlesBySymbol, newsBySymbol, changePercentBySymbol, entries, provider, accessToken)
+  } catch (err) {
+    // Never let a ledger problem stop the screener from publishing.
+    console.error(`Paper trader failed: ${err instanceof Error ? err.message : err}`)
   }
 
   const payload = {

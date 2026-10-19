@@ -1,0 +1,32 @@
+name: Daily paper-trading report
+
+# 15:45 IST = 10:15 UTC. Offset to :17 because GitHub drops/delays runs on
+# round-minute crons (see screener-scan.yml).
+on:
+  schedule:
+    - cron: '17 10 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: screener-scan
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run report:daily
+        env:
+          SCAN_SHARED_SECRET: ${{ secrets.SCAN_SHARED_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NET_TARGET_PCT: ${{ vars.NET_TARGET_PCT }}
